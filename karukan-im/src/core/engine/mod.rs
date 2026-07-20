@@ -28,7 +28,7 @@ use tracing::{debug, trace};
 
 use super::candidate::{Candidate, CandidateList};
 use super::keycode::{KeyEvent, Keysym};
-use super::preedit::{AttributeType, Preedit, PreeditAttribute, PreeditSegment};
+use super::preedit::{AttributeType, Preedit, PreeditAttribute};
 use super::state::InputState;
 use crate::config::settings::Settings;
 
@@ -398,7 +398,13 @@ impl InputMethodEngine {
             })
         };
 
-        self.surrounding_context = Some(SurroundingContext { left, right });
+        self.surrounding_context = if left.as_deref().is_some_and(|text| !text.is_empty())
+            || right.as_deref().is_some_and(|text| !text.is_empty())
+        {
+            Some(SurroundingContext { left, right })
+        } else {
+            None
+        };
     }
 
     /// Handle mode toggle keys (Right Alt/Super/Meta/Hyper): one-way non-Hiragana → Hiragana.
@@ -508,18 +514,34 @@ impl InputMethodEngine {
                 self.converters.romaji.reset();
                 self.input_buf.clear();
                 self.live.text.clear();
+                self.chunks.clear();
                 self.state = InputState::Empty;
                 self.surrounding_context = None;
                 text
             }
-            InputState::Conversion { candidates, .. } => {
-                let text = candidates.selected_text().unwrap_or("").to_string();
-                let reading = candidates.selected().and_then(|c| c.reading.clone());
-                // Record conversion result in learning cache
-                if let Some(reading) = &reading {
-                    self.record_learning(reading, &text);
+            InputState::Conversion { segments, .. } => {
+                let selections: Vec<_> = segments
+                    .iter()
+                    .map(|segment| {
+                        let selected = segment.candidates.selected();
+                        let text = selected
+                            .map(|c| c.text.clone())
+                            .unwrap_or_else(|| segment.reading.clone());
+                        let reading = selected
+                            .and_then(|c| c.reading.clone())
+                            .unwrap_or_else(|| segment.reading.clone());
+                        (reading, text)
+                    })
+                    .collect();
+                let text: String = selections.iter().map(|(_, text)| text.as_str()).collect();
+                if self.input_mode != InputMode::Emoji {
+                    for (reading, text) in &selections {
+                        self.record_learning(reading, text);
+                    }
                 }
                 self.input_buf.clear();
+                self.live.text.clear();
+                self.chunks.clear();
                 self.state = InputState::Empty;
                 self.surrounding_context = None;
                 text

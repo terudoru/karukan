@@ -5,6 +5,15 @@
 use super::candidate::CandidateList;
 use super::preedit::Preedit;
 
+/// One segment inside conversion mode.
+#[derive(Debug, Clone)]
+pub struct ConversionSegment {
+    /// Reading represented by this segment.
+    pub reading: String,
+    /// Candidate list for this segment.
+    pub candidates: CandidateList,
+}
+
 /// The current state of the IME
 #[derive(Debug, Clone, Default)]
 pub enum InputState {
@@ -24,8 +33,12 @@ pub enum InputState {
     Conversion {
         /// The preedit string showing conversion result
         preedit: Preedit,
-        /// List of conversion candidates
+        /// Candidate list for the active segment.
         candidates: CandidateList,
+        /// All conversion segments, each with its own candidate list.
+        segments: Vec<ConversionSegment>,
+        /// Active segment index in `segments`.
+        active_segment: usize,
     },
 }
 

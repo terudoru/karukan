@@ -190,6 +190,15 @@ impl InputMethodEngine {
             self.chunks.clear();
             return None;
         }
+
+        if let Some(user_text) = self.user_dictionary_auto_text(&full_reading) {
+            self.chunks = vec![ComposingChunk {
+                reading: full_reading.clone(),
+                converted: user_text.clone(),
+            }];
+            return (user_text != full_reading).then_some(user_text);
+        }
+
         self.ensure_kanji_converter();
 
         let chunk_len = self.chunk_len();
@@ -267,7 +276,7 @@ impl InputMethodEngine {
     }
 
     /// Configured maximum chunk length in chars, clamped to at least 1.
-    fn chunk_len(&self) -> usize {
+    pub(super) fn chunk_len(&self) -> usize {
         self.config.composing_chunk_len.max(1)
     }
 
@@ -306,13 +315,11 @@ impl InputMethodEngine {
         }
     }
 
-    /// Model conversion of one chunk's `reading` given `lctx`, falling back to
-    /// the reading itself when the model yields nothing.
+    /// Conservative auto conversion of one chunk's `reading` given `lctx`.
+    /// User dictionary spans are preserved, while long speculative model
+    /// conversions are deferred to explicit conversion.
     fn convert_chunk(&mut self, reading: &str, lctx: &str) -> String {
-        self.run_kana_kanji_conversion(reading, lctx, 1)
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| reading.to_string())
+        self.conservative_auto_convert_reading(reading, lctx)
     }
 
     /// Index of the chunk the cursor currently sits in, found by walking the

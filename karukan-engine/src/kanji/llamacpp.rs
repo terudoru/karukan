@@ -25,7 +25,11 @@ static LLAMA_BACKEND: OnceLock<std::result::Result<LlamaBackend, String>> = Once
 fn get_backend() -> Result<&'static LlamaBackend> {
     let result = LLAMA_BACKEND.get_or_init(|| {
         let mut backend = LlamaBackend::init().map_err(|e| e.to_string())?;
-        backend.void_logs();
+        // Keep normal IME use quiet, but allow model/context failures to be
+        // diagnosed without recompiling a special build.
+        if std::env::var_os("KARUKAN_LLAMA_LOG").is_none() {
+            backend.void_logs();
+        }
         Ok(backend)
     });
     match result {
@@ -71,6 +75,13 @@ pub struct LlamaCppModel {
 }
 
 impl LlamaCppModel {
+    fn cpu_model_params() -> Result<LlamaModelParams> {
+        LlamaModelParams::default()
+            .with_n_gpu_layers(0)
+            .with_devices(&[])
+            .map_err(|error| KanjiError::ModelLoad(error.into()))
+    }
+
     /// Load a GGUF model using llama.cpp with an external tokenizer.
     ///
     /// GPT-2 models use CPU only (Metal has issues with GPT-2).
@@ -78,7 +89,7 @@ impl LlamaCppModel {
         let backend = get_backend()?;
 
         // GPT-2 has Metal issues, use CPU
-        let model_params = LlamaModelParams::default().with_n_gpu_layers(0);
+        let model_params = Self::cpu_model_params()?;
 
         let model = LlamaModel::load_from_file(backend, path.as_ref(), &model_params)
             .map_err(|e| KanjiError::ModelLoad(e.into()))?;
@@ -108,7 +119,7 @@ impl LlamaCppModel {
 
         let backend = get_backend()?;
 
-        let mut params = pin!(LlamaModelParams::default().with_n_gpu_layers(0));
+        let mut params = pin!(Self::cpu_model_params()?);
 
         let key =
             CString::new("tokenizer.ggml.pre").map_err(|e| KanjiError::ModelLoad(e.into()))?;
@@ -143,7 +154,7 @@ impl LlamaCppModel {
     ) -> Result<Self> {
         let backend = get_backend()?;
 
-        let model_params = LlamaModelParams::default().with_n_gpu_layers(0);
+        let model_params = Self::cpu_model_params()?;
 
         let model = LlamaModel::load_from_file(backend, path.as_ref(), &model_params)
             .map_err(|e| KanjiError::ModelLoad(e.into()))?;

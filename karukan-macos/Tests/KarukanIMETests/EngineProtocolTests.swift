@@ -68,6 +68,8 @@ final class EngineProtocolTests: XCTestCase {
         let result = try makeProtocolDecoder().decode(InitResult.self, from: Data(json.utf8))
         XCTAssertEqual(result.protocolVersion, 1)
         XCTAssertEqual(result.modelName, "jinen-v1-small-q5")
+        XCTAssertTrue(supportsEngineProtocol(result.protocolVersion))
+        XCTAssertFalse(supportsEngineProtocol(result.protocolVersion + 1))
     }
 
     func testUnknownActionTypeFails() {

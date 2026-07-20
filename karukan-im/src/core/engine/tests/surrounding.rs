@@ -242,6 +242,17 @@ fn test_set_surrounding_context_truncation() {
 }
 
 #[test]
+fn test_zero_context_budget_clears_surrounding_context() {
+    let mut engine = InputMethodEngine::new();
+    engine.config.max_api_context_len = 0;
+
+    engine.set_surrounding_context("左側", "右側");
+
+    assert!(engine.surrounding_context.is_none());
+    assert!(engine.truncate_context_for_api().is_empty());
+}
+
+#[test]
 fn test_display_context_lctx_rctx_format() {
     let mut engine = InputMethodEngine::new();
     engine.config.display_context_len = 10;

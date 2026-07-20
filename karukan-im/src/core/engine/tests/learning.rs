@@ -3,7 +3,9 @@
 //! Space/Down: include learning candidates (default conversion).
 //! Tab: skip learning candidates (lets users escape stale learned entries).
 
-use karukan_engine::LearningCache;
+use std::io::Write;
+
+use karukan_engine::{Dictionary, LearningCache};
 
 use super::*;
 
@@ -18,6 +20,32 @@ fn engine_with_learned(reading: &str, surface: &str) -> InputMethodEngine {
     cache.record(reading, surface);
     engine.learning = Some(cache);
     engine
+}
+
+fn user_dict_with(reading: &str, surface: &str) -> Dictionary {
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    let json = format!(
+        r#"[{{"reading":"{reading}","candidates":[{{"surface":"{surface}","score":1.0}}]}}]"#
+    );
+    tmp.write_all(json.as_bytes()).unwrap();
+    tmp.flush().unwrap();
+    Dictionary::build_from_json(tmp.path()).unwrap()
+}
+
+fn show_candidate_texts(result: &EngineResult) -> Vec<String> {
+    result
+        .actions
+        .iter()
+        .find_map(|a| match a {
+            EngineAction::ShowCandidates(list) => Some(
+                list.candidates()
+                    .iter()
+                    .map(|c| c.text.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 #[test]
@@ -107,5 +135,80 @@ fn space_key_keeps_learning_in_composing() {
         texts.contains(&"藍".to_string()),
         "Space must surface learned `藍`, got {:?}",
         texts,
+    );
+}
+
+#[test]
+fn composing_does_not_show_candidates_before_space() {
+    let mut engine = engine_with_learned("あい", "藍");
+    engine.dicts.user = Some(user_dict_with("あい", "愛"));
+
+    engine.process_key(&press('a'));
+    let result = engine.process_key(&press('i'));
+
+    assert!(
+        show_candidate_texts(&result).is_empty(),
+        "composing should not show conversion candidates before Space"
+    );
+}
+
+#[test]
+fn space_conversion_prioritizes_user_dictionary_over_learning() {
+    let mut engine = engine_with_learned("あい", "藍");
+    engine.dicts.user = Some(user_dict_with("あい", "愛"));
+
+    engine.process_key(&press('a'));
+    engine.process_key(&press('i'));
+    let result = engine.process_key(&press_key(Keysym::SPACE));
+
+    let texts = show_candidate_texts(&result);
+
+    assert_eq!(
+        texts.first().map(String::as_str),
+        Some("愛"),
+        "user dictionary candidate should be first after Space, got {:?}",
+        texts
+    );
+    assert!(
+        texts.iter().any(|t| t == "藍"),
+        "learning candidate should remain after user dictionary, got {:?}",
+        texts
+    );
+}
+
+#[test]
+fn space_conversion_keeps_short_learning_prefix_predictions() {
+    let mut engine = engine_with_learned("あいしてる", "愛してる");
+
+    engine.process_key(&press('a'));
+    engine.process_key(&press('i'));
+    let result = engine.process_key(&press_key(Keysym::SPACE));
+    let texts = show_candidate_texts(&result);
+
+    assert!(
+        texts.iter().any(|t| t == "愛してる"),
+        "short learned prefix prediction should remain, got {:?}",
+        texts
+    );
+}
+
+#[test]
+fn space_conversion_omits_long_learning_prefix_predictions() {
+    let mut engine = engine_with_learned(
+        "きょうはとてもながいぶんしょうをへんかんしました",
+        "今日はとても長い文章を変換しました",
+    );
+
+    engine.process_key(&press('k'));
+    engine.process_key(&press('y'));
+    let result = engine.process_key(&press_key(Keysym::SPACE));
+    let texts = show_candidate_texts(&result);
+
+    assert!(
+        !texts
+            .iter()
+            .any(|t| t == "今日はとても長い文章を変換しました"),
+        "long learned sentence should not appear in prefix auto-suggest, got {:?}",
+        texts
     );
 }

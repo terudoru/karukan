@@ -70,11 +70,12 @@ _ = server  // keep the IMKServer alive
 let engineProcess = EngineProcess()
 let engineClient = EngineClient(serverProcess: engineProcess)
 
-engineProcess.start()
-engineClient.startReaderLoop()
-// Model loading takes seconds (and downloads from HuggingFace on the very
-// first run), so initialize in the background instead of on the first key.
-engineClient.initAsync()
+if engineProcess.start() {
+    engineClient.startReaderLoop()
+    // Model loading takes seconds (and downloads from HuggingFace on the very
+    // first run), so initialize in the background instead of on the first key.
+    engineClient.initAsync()
+}
 
 NSLog("KarukanIME: IMKServer created")
 

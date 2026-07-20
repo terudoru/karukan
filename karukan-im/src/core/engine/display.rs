@@ -217,37 +217,6 @@ impl InputMethodEngine {
         }
     }
 
-    /// Format aux text for auto-suggest mode
-    /// Note: token count is not shown here to avoid performance overhead on every keystroke
-    /// Timing shows inference_ms/process_key_ms (process_key_ms is from previous keystroke)
-    pub(super) fn format_aux_suggest(&self, reading: &str) -> String {
-        // Single context block: the lctx is the current chunk's actual left
-        // context (see `display_context_chunked`), so there is no separate
-        // per-chunk lctx fragment widening the candidate window.
-        let ctx = self.display_context_chunked();
-        let timing = format!(
-            "{}ms/{}ms",
-            self.metrics.conversion_ms, self.metrics.process_key_ms
-        );
-        let model = self.last_used_model();
-        let indicator = self.mode_indicator();
-        // Append unconverted romaji buffer to reading (e.g. "わせだ" + "d" → "わせだd")
-        let romaji_buf = self.converters.romaji.buffer();
-        let display_reading = if romaji_buf.is_empty() {
-            reading.to_string()
-        } else {
-            format!("{}{}", reading, romaji_buf)
-        };
-        if ctx.is_empty() {
-            format!("{} {} | {} | {}", indicator, display_reading, timing, model)
-        } else {
-            format!(
-                "{} {} | ctx: {} | {} | {}",
-                indicator, display_reading, ctx, timing, model
-            )
-        }
-    }
-
     /// Truncate context to safe size for API calls
     pub(super) fn truncate_context_for_api(&self) -> String {
         match self

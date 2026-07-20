@@ -1,4 +1,16 @@
 use super::*;
+use karukan_engine::Dictionary;
+use std::io::Write;
+
+fn user_dict_with(reading: &str, surface: &str) -> Dictionary {
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    let json = format!(
+        r#"[{{"reading":"{reading}","candidates":[{{"surface":"{surface}","score":1.0}}]}}]"#
+    );
+    tmp.write_all(json.as_bytes()).unwrap();
+    tmp.flush().unwrap();
+    Dictionary::build_from_json(tmp.path()).unwrap()
+}
 
 // --- Live conversion tests ---
 
@@ -16,7 +28,8 @@ fn test_live_conversion_enabled() {
 
 #[test]
 fn test_live_conversion_off_unchanged() {
-    // With live_conversion=false, auto-suggest should show candidates (existing behavior)
+    // With live_conversion=false, composing remains plain hiragana and must
+    // not initialize a neural model whose output would be discarded.
     let mut engine = InputMethodEngine::new();
     assert!(!engine.live.enabled);
 
@@ -26,6 +39,8 @@ fn test_live_conversion_off_unchanged() {
     assert_eq!(engine.preedit().unwrap().text(), "あい");
     // live_conversion_text should be empty
     assert!(engine.live.text.is_empty());
+    assert!(engine.converters.kanji.is_none());
+    assert!(engine.chunks.is_empty());
 }
 
 #[test]
@@ -201,10 +216,10 @@ fn test_alphabet_mode_with_kana_keeps_converting() {
 }
 
 #[test]
-fn test_alphabet_mode_pure_latin_preserves_live_text() {
-    // Regression guard for the original behavior: with no kana in the buffer,
-    // alphabet mode preserves an existing live.text display without re-running
-    // conversion (raw latin has nothing for the model to convert).
+fn test_composing_refresh_clears_stale_live_text_before_space() {
+    // The macOS-style flow does not show live conversion/prediction while
+    // composing. If stale live.text exists from an older path, the next input
+    // refresh clears it and keeps the preedit as typed text until Space.
     let mut engine = make_live_conversion_engine();
 
     // Enter alphabet mode with pure latin "Ab".
@@ -215,9 +230,103 @@ fn test_alphabet_mode_pure_latin_preserves_live_text() {
 
     engine.live.text = "AB".to_string();
 
-    // Another latin char keeps the preserved live.text (no reconversion).
+    // Another latin char clears the stale live text instead of displaying it.
     engine.process_key(&press('c'));
-    assert_eq!(engine.live.text, "AB");
+    assert!(engine.live.text.is_empty());
+    assert_eq!(engine.preedit().unwrap().text(), "Abc");
+}
+
+#[test]
+fn test_live_conversion_enabled_does_not_show_candidates_before_space() {
+    let mut engine = make_live_conversion_engine();
+
+    engine.process_key(&press('a'));
+    let result = engine.process_key(&press('i'));
+
+    assert_eq!(engine.preedit().unwrap().text(), "あい");
+    assert!(engine.live.text.is_empty());
+    assert!(
+        result
+            .actions
+            .iter()
+            .any(|a| matches!(a, EngineAction::HideCandidates)),
+        "composing refresh should keep the candidate window hidden until Space"
+    );
+}
+
+#[test]
+fn test_live_conversion_prefers_user_dictionary_before_model() {
+    let mut engine = make_live_conversion_engine();
+    engine.dicts.user = Some(user_dict_with("あい", "愛"));
+
+    engine.process_key(&press('a'));
+    let result = engine.process_key(&press('i'));
+
+    assert_eq!(engine.live.text, "愛");
+    assert_eq!(engine.preedit().unwrap().text(), "愛");
+    assert!(
+        result
+            .actions
+            .iter()
+            .any(|a| matches!(a, EngineAction::HideCandidates)),
+        "live conversion should use the user dictionary without showing candidates before Space"
+    );
+}
+
+#[test]
+fn test_live_conversion_preserves_user_dictionary_inside_longer_input() {
+    let mut engine = make_live_conversion_engine();
+    engine.dicts.user = Some(user_dict_with("あい", "愛"));
+
+    for ch in ['a', 'i', 'u', 'e'] {
+        engine.process_key(&press(ch));
+    }
+
+    assert_eq!(engine.input_buf.text, "あいうえ");
+    assert_eq!(engine.live.text, "愛うえ");
+    assert_eq!(engine.preedit().unwrap().text(), "愛うえ");
+}
+
+#[test]
+fn test_only_user_dictionary_can_supply_automatic_fixed_spans() {
+    let mut engine = make_live_conversion_engine();
+    engine.dicts.system = Some(user_dict_with("ぷろぐらむ", "プログラム"));
+
+    assert_eq!(
+        engine.user_dictionary_auto_text("ぷろぐらむしょぞく"),
+        None,
+        "system-dictionary prefixes must not be treated as fixed user registrations"
+    );
+}
+
+#[test]
+fn test_live_conversion_keeps_exact_user_dictionary_long_phrase() {
+    let mut engine = make_live_conversion_engine();
+    engine.dicts.user = Some(user_dict_with(
+        "にいがただいがくこうがくぶゆうごうりょういきぶんやきょうそうけいえいぷろぐらむしょぞく",
+        "新潟大学工学部融合領域分野協創経営プログラム所属",
+    ));
+
+    engine.input_buf.insert(
+        "にいがただいがくこうがくぶゆうごうりょういきぶんやきょうそうけいえいぷろぐらむしょぞく",
+    );
+    let result = engine.refresh_input_state();
+
+    assert_eq!(
+        engine.live.text,
+        "新潟大学工学部融合領域分野協創経営プログラム所属"
+    );
+    assert_eq!(
+        engine.preedit().unwrap().text(),
+        "新潟大学工学部融合領域分野協創経営プログラム所属"
+    );
+    assert!(
+        result
+            .actions
+            .iter()
+            .any(|a| matches!(a, EngineAction::HideCandidates)),
+        "user dictionary conversion should not open the candidate window while composing"
+    );
 }
 
 // --- Ctrl+Space full-width space tests ---

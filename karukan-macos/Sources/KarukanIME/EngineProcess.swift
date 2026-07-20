@@ -37,16 +37,18 @@ class EngineProcess {
         return Bundle.main.bundlePath + "/Contents/MacOS/karukan-imserver"
     }
 
-    func start() {
+    @discardableResult
+    func start() -> Bool {
         if let existing = process, existing.isRunning {
             NSLog("KarukanIME: karukan-imserver already running (pid=\(existing.processIdentifier))")
-            return
+            return true
         }
 
         let path = serverPath()
         guard FileManager.default.fileExists(atPath: path) else {
             NSLog("KarukanIME: karukan-imserver not found at \(path)")
-            return
+            scheduleRestart()
+            return false
         }
 
         let proc = Process()
@@ -75,10 +77,16 @@ class EngineProcess {
             self.process = proc
             self.stdinPipe = stdin
             self.stdoutPipe = stdout
+            installTerminationObserverIfNeeded()
+            return true
         } catch {
             NSLog("KarukanIME: failed to start karukan-imserver: \(error)")
+            scheduleRestart()
+            return false
         }
+    }
 
+    private func installTerminationObserverIfNeeded() {
         if terminationObserver == nil {
             terminationObserver = NotificationCenter.default.addObserver(
                 forName: NSApplication.willTerminateNotification,
@@ -95,6 +103,12 @@ class EngineProcess {
     private func handleTermination(of terminatedProcess: Process) {
         guard process === terminatedProcess, shouldRestart else { return }
 
+        scheduleRestart()
+    }
+
+    private func scheduleRestart() {
+        guard shouldRestart, pendingRestart == nil else { return }
+
         let delay = min(pow(2.0, Double(restartCount)), 15.0)
         restartCount += 1
         NSLog("KarukanIME: restarting karukan-imserver in \(delay)s (attempt \(restartCount))")
@@ -102,8 +116,9 @@ class EngineProcess {
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             self.pendingRestart = nil
-            self.start()
-            self.onRestart?()
+            if self.start() {
+                self.onRestart?()
+            }
         }
         pendingRestart = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
@@ -145,8 +160,9 @@ class EngineProcess {
                 self.restartInFlight = false
                 self.shouldRestart = true
                 self.restartCount = 0
-                self.start()
-                self.onRestart?()
+                if self.start() {
+                    self.onRestart?()
+                }
             }
         }
     }

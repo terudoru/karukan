@@ -5,9 +5,13 @@
 //! simple TSV file (`reading\tsurface\tfrequency\tlast_access`).
 
 use std::collections::HashMap;
-use std::io::{BufRead, Write};
-use std::path::Path;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufWriter, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A single learned conversion entry.
 #[derive(Debug, Clone)]
@@ -133,7 +137,10 @@ impl LearningCache {
                 });
         }
 
-        // Not dirty — just loaded from disk
+        // Enforce the configured memory bound immediately. Otherwise an
+        // oversized file remains fully resident until the next save.
+        cache.evict();
+        // Not dirty — the retained entries were loaded from disk.
         cache.dirty = false;
         Ok(cache)
     }
@@ -142,12 +149,36 @@ impl LearningCache {
     pub fn save(&mut self, path: &Path) -> anyhow::Result<()> {
         self.evict();
 
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let (temporary_path, file) = create_temporary_file(path)?;
+        let save_result = (|| -> anyhow::Result<()> {
+            let mut writer = BufWriter::new(file);
+            self.write_tsv(&mut writer)?;
+            writer.flush()?;
+            writer.get_ref().sync_all()?;
+            drop(writer);
 
-        let file = std::fs::File::create(path)?;
-        let mut writer = std::io::BufWriter::new(file);
+            std::fs::rename(&temporary_path, path)?;
+            // Best effort: syncing the directory makes the rename durable on
+            // filesystems that support directory fsync. The data file itself
+            // has already been synced above, so lack of directory-sync support
+            // must not turn a successful replacement into a reported failure.
+            if let Ok(directory) = File::open(parent) {
+                let _ = directory.sync_all();
+            }
+            Ok(())
+        })();
+
+        if save_result.is_err() {
+            let _ = std::fs::remove_file(&temporary_path);
+        }
+        save_result?;
+        self.dirty = false;
+        Ok(())
+    }
+
+    fn write_tsv(&self, writer: &mut dyn Write) -> std::io::Result<()> {
         writeln!(writer, "# karukan learning cache v1")?;
 
         // Sort readings for deterministic output
@@ -166,8 +197,6 @@ impl LearningCache {
             }
         }
 
-        writer.flush()?;
-        self.dirty = false;
         Ok(())
     }
 
@@ -220,6 +249,32 @@ impl LearningCache {
                     self.entries.remove(reading);
                 }
             }
+        }
+    }
+}
+
+fn create_temporary_file(path: &Path) -> std::io::Result<(PathBuf, File)> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("learning.tsv");
+
+    loop {
+        let sequence = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temporary_path = parent.join(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            sequence
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+        {
+            Ok(file) => return Ok((temporary_path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
         }
     }
 }
@@ -318,6 +373,25 @@ mod tests {
         let results = loaded.lookup("きょう");
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, "今日"); // frequency 2
+    }
+
+    #[test]
+    fn test_save_atomically_replaces_existing_file_without_leftovers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("learning.tsv");
+        std::fs::write(&path, "old incomplete content").unwrap();
+
+        let mut cache = LearningCache::new(100);
+        cache.record("あい", "愛");
+        cache.save(&path).unwrap();
+
+        let loaded = LearningCache::load(&path, 100).unwrap();
+        assert_eq!(loaded.lookup("あい")[0].0, "愛");
+        let entries: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("learning.tsv")]);
     }
 
     #[test]
@@ -435,5 +509,17 @@ mod tests {
         let cache = LearningCache::load(file.path(), 100).unwrap();
         // Only the first valid line should be loaded
         assert_eq!(cache.entry_count(), 1);
+    }
+
+    #[test]
+    fn test_load_enforces_entry_limit() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "a\tA\t1\t1\nb\tB\t10\t1\nc\tC\t100\t1\n").unwrap();
+
+        let cache = LearningCache::load(file.path(), 2).unwrap();
+
+        assert_eq!(cache.entry_count(), 2);
+        assert!(cache.lookup("a").is_empty());
+        assert!(!cache.is_dirty());
     }
 }

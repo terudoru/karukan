@@ -1,20 +1,53 @@
 import Cocoa
 
+/// Place a candidate panel on the display containing the composition cursor,
+/// flipping above when necessary and clamping both axes to the visible frame.
+/// Kept as a pure function so multi-display edge cases are unit-testable
+/// without showing an NSPanel.
+func candidatePanelFrame(
+    cursorRect: NSRect, panelSize: NSSize, visibleFrames: [NSRect]
+) -> NSRect {
+    guard
+        let visibleFrame = visibleFrames.first(where: { frame in
+            frame.contains(NSPoint(x: cursorRect.midX, y: cursorRect.midY))
+                || frame.intersects(cursorRect)
+        }) ?? visibleFrames.first
+    else {
+        return NSRect(origin: cursorRect.origin, size: panelSize)
+    }
+
+    let width = min(panelSize.width, visibleFrame.width)
+    let height = min(panelSize.height, visibleFrame.height)
+    let proposedBelow = cursorRect.minY - height
+    let proposedY = proposedBelow >= visibleFrame.minY ? proposedBelow : cursorRect.maxY
+    let maxX = max(visibleFrame.minX, visibleFrame.maxX - width)
+    let maxY = max(visibleFrame.minY, visibleFrame.maxY - height)
+    let originX = min(max(cursorRect.minX, visibleFrame.minX), maxX)
+    let originY = min(max(proposedY, visibleFrame.minY), maxY)
+
+    return NSRect(x: originX, y: originY, width: width, height: height)
+}
+
 /// Custom candidate window (borderless non-activating NSPanel).
 ///
 /// The engine pre-paginates: `show` receives only the visible page plus
 /// page metadata, so this controller just renders rows. An optional aux
 /// line (reading hint / model info from the engine) is shown as a footer.
 class CandidateWindowController {
-    // Visual scale of the panel. Candidate rows use a larger type size
-    // than the footers (page indicator / aux line), matching the system
-    // Japanese IME's proportions.
-    private static let candidateFontSize: CGFloat = 18
-    private static let footerFontSize: CGFloat = 13
-    private static let minPanelWidth: CGFloat = 160
+    // Keep the candidate panel close to macOS' built-in Japanese IME scale.
+    private static let candidateFontSize: CGFloat = 14
+    private static let footerFontSize: CGFloat = 11
+    private static let minPanelWidth: CGFloat = 140
+    private static let minPanelHeight: CGFloat = 24
+    private static let panelWidthPadding: CGFloat = 8
+    private static let panelHeightPadding: CGFloat = 4
+    private static let panelCornerRadius: CGFloat = 8
+    private static let stackHorizontalInset: CGFloat = 3
+    private static let stackVerticalInset: CGFloat = 2
 
     private let panel: NSPanel
     private let stackView: NSStackView
+    private let panelBackgroundView: NSView
     private var rowViews: [NSView] = []
     private var auxText: String?
 
@@ -36,23 +69,43 @@ class CandidateWindowController {
         panel.level = .popUpMenu
         panel.hidesOnDeactivate = false
         panel.isOpaque = false
-        panel.backgroundColor = NSColor.windowBackgroundColor
+        panel.backgroundColor = .clear
         panel.ignoresMouseEvents = true
+        panel.hasShadow = true
+
+        panelBackgroundView = NSView()
+        panelBackgroundView.translatesAutoresizingMaskIntoConstraints = false
+        panelBackgroundView.wantsLayer = true
+        panelBackgroundView.layer?.cornerRadius = Self.panelCornerRadius
+        panelBackgroundView.layer?.borderWidth = 0.5
+        panelBackgroundView.layer?.borderColor = NSColor.separatorColor.cgColor
+        panelBackgroundView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        panelBackgroundView.layer?.masksToBounds = true
 
         stackView = NSStackView()
         stackView.orientation = .vertical
         stackView.alignment = .leading
-        stackView.spacing = 4
-        stackView.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        stackView.spacing = 1
+        stackView.edgeInsets = NSEdgeInsets(
+            top: Self.stackVerticalInset,
+            left: Self.stackHorizontalInset,
+            bottom: Self.stackVerticalInset,
+            right: Self.stackHorizontalInset
+        )
         stackView.translatesAutoresizingMaskIntoConstraints = false
 
-        panel.contentView?.addSubview(stackView)
+        panelBackgroundView.addSubview(stackView)
+        panel.contentView?.addSubview(panelBackgroundView)
         if let contentView = panel.contentView {
             NSLayoutConstraint.activate([
-                stackView.topAnchor.constraint(equalTo: contentView.topAnchor),
-                stackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-                stackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-                stackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+                panelBackgroundView.topAnchor.constraint(equalTo: contentView.topAnchor),
+                panelBackgroundView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+                panelBackgroundView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+                panelBackgroundView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+                stackView.topAnchor.constraint(equalTo: panelBackgroundView.topAnchor),
+                stackView.leadingAnchor.constraint(equalTo: panelBackgroundView.leadingAnchor),
+                stackView.trailingAnchor.constraint(equalTo: panelBackgroundView.trailingAnchor),
+                stackView.bottomAnchor.constraint(equalTo: panelBackgroundView.bottomAnchor),
             ])
         }
     }
@@ -116,11 +169,21 @@ class CandidateWindowController {
     }
 
     private func addCandidateRow(_ candidate: CandidateItem, number: Int, selected: Bool) {
+        let rowContainer = NSView()
+        rowContainer.translatesAutoresizingMaskIntoConstraints = false
+        rowContainer.wantsLayer = true
+        rowContainer.layer?.cornerRadius = 4
+        rowContainer.layer?.masksToBounds = true
+        rowContainer.layer?.backgroundColor = selected
+            ? NSColor.selectedControlColor.cgColor
+            : NSColor.clear.cgColor
+
         let text = NSMutableAttributedString(
             string: "\(number). \(candidate.text)",
             attributes: [
                 .font: NSFont.systemFont(ofSize: Self.candidateFontSize),
-                .foregroundColor: selected ? NSColor.white : NSColor.labelColor,
+                .foregroundColor:
+                    selected ? NSColor.alternateSelectedControlTextColor : NSColor.labelColor,
             ]
         )
         if let description = candidate.description {
@@ -130,7 +193,7 @@ class CandidateWindowController {
                     attributes: [
                         .font: NSFont.systemFont(ofSize: Self.footerFontSize),
                         .foregroundColor: selected
-                            ? NSColor.white.withAlphaComponent(0.8)
+                            ? NSColor.alternateSelectedControlTextColor.withAlphaComponent(0.8)
                             : NSColor.secondaryLabelColor,
                     ]
                 ))
@@ -138,15 +201,24 @@ class CandidateWindowController {
 
         let label = NSTextField(labelWithAttributedString: text)
         label.translatesAutoresizingMaskIntoConstraints = false
-        if selected {
-            label.backgroundColor = NSColor.selectedContentBackgroundColor
-            label.drawsBackground = true
-        } else {
-            label.backgroundColor = .clear
-            label.drawsBackground = false
-        }
-        stackView.addArrangedSubview(label)
-        rowViews.append(label)
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        rowContainer.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            rowContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.minPanelHeight),
+            label.topAnchor.constraint(
+                equalTo: rowContainer.topAnchor, constant: 2),
+            label.leadingAnchor.constraint(
+                equalTo: rowContainer.leadingAnchor, constant: 6),
+            label.trailingAnchor.constraint(
+                equalTo: rowContainer.trailingAnchor, constant: -6),
+            label.bottomAnchor.constraint(
+                equalTo: rowContainer.bottomAnchor, constant: -2),
+        ])
+
+        stackView.addArrangedSubview(rowContainer)
+        rowViews.append(rowContainer)
     }
 
     private func addFooterLabel(_ text: String) {
@@ -168,8 +240,8 @@ class CandidateWindowController {
 
         stackView.layoutSubtreeIfNeeded()
         let contentSize = stackView.fittingSize
-        let panelWidth = max(contentSize.width + 16, Self.minPanelWidth)
-        let panelHeight = contentSize.height + 8
+        let panelWidth = max(contentSize.width + Self.panelWidthPadding, Self.minPanelWidth)
+        let panelHeight = contentSize.height + Self.panelHeightPadding
 
         guard cursorRect != .zero else {
             panel.setFrame(
@@ -178,25 +250,12 @@ class CandidateWindowController {
             return
         }
 
-        // Flip above the cursor when the panel would fall off the bottom of
-        // the screen.
-        let showAbove: Bool
-        if let screen = NSScreen.main {
-            showAbove = cursorRect.origin.y - panelHeight < screen.visibleFrame.origin.y
-        } else {
-            showAbove = false
-        }
-
-        let originY: CGFloat
-        if showAbove {
-            originY = cursorRect.origin.y + cursorRect.size.height
-        } else {
-            originY = cursorRect.origin.y - panelHeight
-        }
-
-        panel.setFrame(
-            NSRect(x: cursorRect.origin.x, y: originY, width: panelWidth, height: panelHeight),
-            display: true)
+        let frame = candidatePanelFrame(
+            cursorRect: cursorRect,
+            panelSize: NSSize(width: panelWidth, height: panelHeight),
+            visibleFrames: NSScreen.screens.map(\.visibleFrame)
+        )
+        panel.setFrame(frame, display: true)
         panel.orderFront(nil)
     }
 }

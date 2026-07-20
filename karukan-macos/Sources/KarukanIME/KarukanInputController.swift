@@ -219,10 +219,7 @@ class KarukanInputController: IMKInputController {
             return
         }
 
-        let attributed = NSMutableAttributedString(
-            string: text,
-            attributes: [.underlineStyle: NSUnderlineStyle.single.rawValue]
-        )
+        let attributed = NSMutableAttributedString(string: text)
         for attr in attributes {
             guard let range = utf16Range(of: attr.start..<attr.end, in: text) else { continue }
             let style: NSUnderlineStyle
@@ -232,13 +229,20 @@ class KarukanInputController: IMKInputController {
             // text, since background colors are unreliable across apps).
             case "underline_double", "highlight", "reverse":
                 style = .thick
+                attributed.addAttribute(.underlineColor, value: NSColor.labelColor, range: range)
             default:
                 style = .single
+                attributed.addAttribute(
+                    .underlineColor, value: NSColor.tertiaryLabelColor, range: range)
             }
             attributed.addAttribute(.underlineStyle, value: style.rawValue, range: range)
         }
 
         let caretUTF16 = utf16Offset(ofScalarOffset: caret, in: text)
+        // Keep IMK's actual selection collapsed. A non-empty selectionRange is
+        // treated by some clients as text selected inside the marked text; the
+        // next setMarkedText can then replace only that range and duplicate a
+        // clause. Segment focus is represented by underline attributes instead.
         client.setMarkedText(
             attributed,
             selectionRange: NSRange(location: caretUTF16, length: 0),

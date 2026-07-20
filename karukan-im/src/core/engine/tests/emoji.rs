@@ -74,6 +74,11 @@ fn emoji_mode_shows_candidates_via_rewriter() {
         "expected 😄 in candidates, got {:?}",
         texts
     );
+    assert!(
+        engine.converters.kanji.is_none(),
+        "emoji shortcode lookup must not initialize the neural converter"
+    );
+    assert!(engine.chunks.is_empty());
 }
 
 #[test]

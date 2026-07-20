@@ -7,9 +7,25 @@ use std::time::Instant;
 use tracing::debug;
 
 use super::*;
+use crate::core::state::ConversionSegment;
 
 /// Maximum number of learning candidates to show
 const MAX_LEARNING_CANDIDATES: usize = 3;
+/// Do not surface long learned sentences through prefix prediction. Exact
+/// matches are still allowed; this only prevents a past long conversion from
+/// dominating suggestions after typing its first few kana.
+const MAX_LEARNING_PREFIX_READING_CHARS: usize = 12;
+const MAX_LEARNING_PREFIX_SURFACE_CHARS: usize = 24;
+/// Explicit conversion segments should be short enough that Left/Right can
+/// choose a useful clause even when live-conversion chunking uses a larger
+/// latency-oriented chunk size.
+const MAX_EXPLICIT_SEGMENT_CHARS: usize = 8;
+const SEGMENT_DISPLAY_SEPARATOR: &str = "\u{200B}";
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ReadingSpan {
+    pub reading: String,
+    pub fixed_surface: Option<String>,
+}
 
 /// Mozc-style width/script annotation for a pure-kana candidate, or `None`
 /// if the text mixes scripts or contains kanji/punctuation. Used to label
@@ -24,11 +40,205 @@ fn width_annotation(text: &str) -> Option<&'static str> {
     }
 }
 
+fn is_hiragana_char(c: char) -> bool {
+    matches!(c, '\u{3040}'..='\u{309F}')
+}
+
+fn is_full_katakana_char(c: char) -> bool {
+    matches!(c, '\u{30A0}'..='\u{30FF}') && c != '\u{30FB}'
+}
+
+fn is_kanji_char(c: char) -> bool {
+    matches!(c, '\u{3400}'..='\u{9FFF}')
+}
+
+fn has_multiple_katakana_runs(text: &str) -> bool {
+    let mut runs = 0usize;
+    let mut in_run = false;
+    for ch in text.chars() {
+        if is_full_katakana_char(ch) {
+            if !in_run {
+                runs += 1;
+                if runs >= 2 {
+                    return true;
+                }
+            }
+            in_run = true;
+        } else {
+            in_run = false;
+        }
+    }
+    false
+}
+
+fn suspicious_auto_conversion(reading: &str, converted: &str) -> bool {
+    if converted.is_empty() {
+        return true;
+    }
+
+    let reading_is_kana = reading
+        .chars()
+        .all(|ch| is_hiragana_char(ch) || is_full_katakana_char(ch));
+    if !reading_is_kana {
+        return false;
+    }
+
+    // A neural guess must never silently turn an all-hiragana reading into
+    // Latin text during live conversion. Explicit conversion still exposes
+    // the model candidate, and user-dictionary replacements bypass this
+    // heuristic, so legitimate registrations such as `えーあい -> AI` keep
+    // working without allowing hallucinations such as `あい -> I` to become
+    // the marked text and then be committed by Enter.
+    if converted.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        return true;
+    }
+
+    let mut total = 0usize;
+    let mut katakana = 0usize;
+    let mut kanji = 0usize;
+    for ch in converted.chars() {
+        total += 1;
+        if is_full_katakana_char(ch) {
+            katakana += 1;
+        } else if is_kanji_char(ch) {
+            kanji += 1;
+        }
+    }
+
+    // A normal loanword such as `プログラム所属` has one katakana run. The
+    // failure mode we want to suppress is a long sentence broken into several
+    // katakana fragments around kanji, e.g. `ニイガタ第ガクコウ学部...`.
+    kanji > 0 && has_multiple_katakana_runs(converted) && katakana * 3 >= total
+}
+
+fn split_surface_by_reading_lengths(surface: &str, spans: &[ReadingSpan]) -> Vec<Option<String>> {
+    let mut surfaces = Vec::with_capacity(spans.len());
+    let chars: Vec<char> = surface.chars().collect();
+    if chars.is_empty() || spans.is_empty() {
+        return vec![None; spans.len()];
+    }
+
+    let total_reading_len: usize = spans.iter().map(|span| span.reading.chars().count()).sum();
+    if total_reading_len == 0 {
+        return vec![None; spans.len()];
+    }
+
+    let mut start = 0usize;
+    let mut consumed_reading_len = 0usize;
+    for (idx, span) in spans.iter().enumerate() {
+        consumed_reading_len += span.reading.chars().count();
+        let remaining_segments = spans.len() - idx - 1;
+        let proportional_end = if idx + 1 == spans.len() {
+            chars.len()
+        } else {
+            (consumed_reading_len * chars.len()).div_ceil(total_reading_len)
+        };
+        let min_end = start + usize::from(chars.len() - start > remaining_segments);
+        let max_end = chars.len().saturating_sub(remaining_segments);
+        let end = proportional_end.clamp(min_end, max_end);
+        surfaces.push((start < end).then(|| chars[start..end].iter().collect()));
+        start = end;
+    }
+    surfaces
+}
+
+/// Split an already displayed surface while keeping user-dictionary spans as
+/// exact anchors. A proportional split alone can consume part of the following
+/// free span (`愛うえ` + readings `あい`/`うえ` became `愛う`/`え`).
+fn split_surface_preserving_fixed_spans(
+    surface: &str,
+    spans: &[ReadingSpan],
+) -> Vec<Option<String>> {
+    let surface_chars: Vec<char> = surface.chars().collect();
+    let mut result = vec![None; spans.len()];
+    let mut surface_start = 0usize;
+    let mut span_start = 0usize;
+
+    for (idx, span) in spans.iter().enumerate() {
+        let Some(fixed) = span.fixed_surface.as_deref() else {
+            continue;
+        };
+        let fixed_chars: Vec<char> = fixed.chars().collect();
+        if fixed_chars.is_empty() {
+            return split_surface_by_reading_lengths(surface, spans);
+        }
+        let Some(relative_start) = surface_chars[surface_start..]
+            .windows(fixed_chars.len())
+            .position(|window| window == fixed_chars.as_slice())
+        else {
+            // The displayed model surface does not contain the registered
+            // value, so there is no trustworthy anchor. Preserve the old
+            // whole-surface behavior instead of dropping characters.
+            return split_surface_by_reading_lengths(surface, spans);
+        };
+        let fixed_start = surface_start + relative_start;
+
+        if span_start < idx {
+            let free_surface: String = surface_chars[surface_start..fixed_start].iter().collect();
+            for (offset, value) in
+                split_surface_by_reading_lengths(&free_surface, &spans[span_start..idx])
+                    .into_iter()
+                    .enumerate()
+            {
+                result[span_start + offset] = value;
+            }
+        }
+
+        result[idx] = Some(fixed.to_string());
+        surface_start = fixed_start + fixed_chars.len();
+        span_start = idx + 1;
+    }
+
+    if span_start < spans.len() {
+        let tail: String = surface_chars[surface_start..].iter().collect();
+        for (offset, value) in split_surface_by_reading_lengths(&tail, &spans[span_start..])
+            .into_iter()
+            .enumerate()
+        {
+            result[span_start + offset] = value;
+        }
+    }
+
+    result
+}
+
+fn merge_reading_spans(left: ReadingSpan, right: ReadingSpan) -> ReadingSpan {
+    let fixed_surface = match (left.fixed_surface, right.fixed_surface) {
+        (Some(left), Some(right)) => Some(format!("{left}{right}")),
+        _ => None,
+    };
+    ReadingSpan {
+        reading: format!("{}{}", left.reading, right.reading),
+        fixed_surface,
+    }
+}
+
+fn coalesce_spans_to_surface_len(mut spans: Vec<ReadingSpan>, surface: &str) -> Vec<ReadingSpan> {
+    let limit = surface.chars().count();
+    if limit == 0 || spans.len() <= limit {
+        return spans;
+    }
+
+    while spans.len() > limit {
+        let merge_at = spans
+            .windows(2)
+            .enumerate()
+            .filter(|(_, pair)| pair[0].fixed_surface.is_none() && pair[1].fixed_surface.is_none())
+            .min_by_key(|(_, pair)| {
+                pair[0].reading.chars().count() + pair[1].reading.chars().count()
+            })
+            .map(|(idx, _)| idx)
+            .unwrap_or_else(|| spans.len().saturating_sub(2));
+        let right = spans.remove(merge_at + 1);
+        let left = spans.remove(merge_at);
+        spans.insert(merge_at, merge_reading_spans(left, right));
+    }
+    spans
+}
+
 /// Helper for building a deduplicated list of conversion candidates.
 ///
-/// Two push paths exist: [`push`] dedups by text (skips duplicates), and
-/// [`push_force`] always inserts (used for learning candidates that should
-/// appear at the top even if a later source re-emits the same text).
+/// Candidate text is used as the deduplication key; earlier sources win.
 struct CandidateBuilder {
     candidates: Vec<AnnotatedCandidate>,
     seen: HashSet<String>,
@@ -42,19 +252,10 @@ impl CandidateBuilder {
         }
     }
 
-    /// Push a candidate if its text hasn't been seen yet.
     fn push(&mut self, ac: AnnotatedCandidate) {
         if self.seen.insert(ac.text.clone()) {
             self.candidates.push(ac);
         }
-    }
-
-    /// Push a candidate unconditionally, marking its text as seen so later
-    /// dedup'd inserts skip it. Use only for sources that should win over
-    /// duplicates from later steps (e.g. learning cache).
-    fn push_force(&mut self, ac: AnnotatedCandidate) {
-        self.seen.insert(ac.text.clone());
-        self.candidates.push(ac);
     }
 
     fn is_empty(&self) -> bool {
@@ -198,24 +399,10 @@ impl InputMethodEngine {
             return EngineResult::consumed();
         }
 
-        // Get candidates from kanji converter (use full num_candidates for explicit conversion)
-        let mut candidates =
-            self.build_conversion_candidates(&reading, self.config.num_candidates, skip_learning);
+        let segments =
+            self.build_initial_conversion_segment(&reading, &prev_suggest_text, skip_learning);
 
-        // If the previous auto-suggest result is not in the new candidates, insert it at the top
-        // so it doesn't disappear when the conversion strategy changes.
-        let seen: HashSet<&str> = candidates.iter().map(|c| c.text.as_str()).collect();
-        if !prev_suggest_text.is_empty()
-            && prev_suggest_text != reading
-            && !seen.contains(prev_suggest_text.as_str())
-        {
-            candidates.insert(
-                0,
-                AnnotatedCandidate::new(prev_suggest_text, CandidateSource::Model),
-            );
-        }
-
-        if candidates.is_empty() {
+        if segments.is_empty() {
             // No candidates, stay in hiragana mode
             let preedit = Preedit::with_text_underlined(&reading);
             self.state = InputState::Composing {
@@ -225,17 +412,78 @@ impl InputMethodEngine {
             return EngineResult::consumed().with_action(EngineAction::UpdatePreedit(preedit));
         }
 
-        // Map AnnotatedCandidate → public Candidate. The two annotation
-        // slots are kept disjoint so descriptions never duplicate between the
-        // aux text and the candidate's right-side comment:
-        //   - `source_label` ← source.label() only (e.g. `🤖 AI`, `📚 辞書`)
-        //   - `description`  ← the per-candidate description only
-        //                      (e.g. `三点リーダ`, `[全]英大文字`)
-        let candidate_list = CandidateList::new(
+        self.enter_conversion_state(segments)
+    }
+
+    /// Transition to Conversion state with the given segments.
+    ///
+    /// Sets up the preedit (highlighted selected text), updates the state, and
+    /// returns an EngineResult with preedit, candidates, and aux text actions.
+    fn enter_conversion_state(&mut self, segments: Vec<ConversionSegment>) -> EngineResult {
+        let active_segment = 0;
+        let candidates = segments[active_segment].candidates.clone();
+        let preedit = Self::build_conversion_preedit_from_segments(&segments, active_segment);
+        let reading = segments[active_segment].reading.clone();
+
+        self.state = InputState::Conversion {
+            preedit: preedit.clone(),
+            candidates: candidates.clone(),
+            segments,
+            active_segment,
+        };
+
+        EngineResult::consumed()
+            .with_action(EngineAction::UpdatePreedit(preedit))
+            .with_action(EngineAction::ShowCandidates(candidates.clone()))
+            .with_action(EngineAction::UpdateAuxText(
+                self.format_aux_conversion_with_page(&reading, Some(&candidates)),
+            ))
+    }
+
+    fn build_conversion_preedit_from_segments(
+        segments: &[ConversionSegment],
+        active_segment: usize,
+    ) -> Preedit {
+        let mut caret = 0;
+        let mut text = String::new();
+        let mut attributes = Vec::new();
+        for (idx, segment) in segments.iter().enumerate() {
+            if idx > 0 {
+                text.push_str(SEGMENT_DISPLAY_SEPARATOR);
+            }
+            let start = text.chars().count();
+            let segment_text = segment
+                .candidates
+                .selected_text()
+                .unwrap_or(&segment.reading)
+                .to_string();
+            text.push_str(&segment_text);
+            let end = text.chars().count();
+            if idx <= active_segment {
+                caret = end;
+            }
+            let attr = if idx == active_segment {
+                AttributeType::Highlight
+            } else {
+                AttributeType::Underline
+            };
+            attributes.push(PreeditAttribute::new(start, end, attr));
+        }
+        let mut preedit = Preedit::with_text(text);
+        preedit.set_caret(caret);
+        preedit.set_attributes(attributes);
+        preedit
+    }
+
+    fn annotated_to_candidate_list(
+        candidates: Vec<AnnotatedCandidate>,
+        reading: &str,
+    ) -> CandidateList {
+        CandidateList::new(
             candidates
                 .into_iter()
                 .map(|ac| {
-                    let cand_reading = ac.reading.unwrap_or_else(|| reading.clone());
+                    let cand_reading = ac.reading.unwrap_or_else(|| reading.to_string());
                     let label = ac.source.label();
                     Candidate {
                         text: ac.text,
@@ -245,33 +493,248 @@ impl InputMethodEngine {
                     }
                 })
                 .collect(),
-        );
-        self.enter_conversion_state(&reading, candidate_list)
+        )
     }
 
-    /// Transition to Conversion state with the given reading and candidate list.
-    ///
-    /// Sets up the preedit (highlighted selected text), updates the state, and
-    /// returns an EngineResult with preedit, candidates, and aux text actions.
-    fn enter_conversion_state(&mut self, reading: &str, candidates: CandidateList) -> EngineResult {
-        let selected_text = candidates.selected_text().unwrap_or(reading).to_string();
+    fn candidate_list_for_conversion_segment(
+        &mut self,
+        reading: &str,
+        preferred_text: Option<&str>,
+        skip_learning: bool,
+    ) -> CandidateList {
+        let mut candidates =
+            self.build_conversion_candidates(reading, self.config.num_candidates, skip_learning);
 
-        let preedit = Preedit::from_segments(
-            vec![PreeditSegment::highlighted(&selected_text)],
-            selected_text.chars().count(),
-        );
+        if let Some(preferred_text) = preferred_text
+            && !preferred_text.is_empty()
+        {
+            if let Some(index) = candidates.iter().position(|c| c.text == preferred_text) {
+                let preferred = candidates.remove(index);
+                candidates.insert(0, preferred);
+            } else if preferred_text != reading {
+                candidates.insert(
+                    0,
+                    AnnotatedCandidate::new(preferred_text, CandidateSource::Model),
+                );
+            }
+        }
 
-        self.state = InputState::Conversion {
-            preedit: preedit.clone(),
-            candidates: candidates.clone(),
-        };
+        Self::annotated_to_candidate_list(candidates, reading)
+    }
 
-        EngineResult::consumed()
-            .with_action(EngineAction::UpdatePreedit(preedit))
-            .with_action(EngineAction::ShowCandidates(candidates.clone()))
-            .with_action(EngineAction::UpdateAuxText(
-                self.format_aux_conversion_with_page(reading, Some(&candidates)),
-            ))
+    fn longest_user_dict_prefix(&self, input: &str) -> Option<(String, String)> {
+        let dict = self.dicts.user.as_ref()?;
+        dict.common_prefix_search(input)
+            .into_iter()
+            .filter_map(|entry| {
+                let surface = entry.candidates.first()?.surface.clone();
+                Some((entry.reading.to_string(), surface))
+            })
+            .max_by_key(|(reading, _)| reading.chars().count())
+    }
+
+    fn longest_system_reading_prefix(&self, input: &str) -> Option<String> {
+        const MIN_SYSTEM_WORD_READING_CHARS: usize = 2;
+        let dict = self.dicts.system.as_ref()?;
+        dict.common_prefix_search(input)
+            .into_iter()
+            .map(|entry| entry.reading.to_string())
+            .filter(|reading| reading.chars().count() >= MIN_SYSTEM_WORD_READING_CHARS)
+            .max_by_key(|reading| reading.chars().count())
+    }
+
+    fn split_free_reading_segments(&self, reading: &str) -> Vec<ReadingSpan> {
+        let chars: Vec<char> = reading.chars().collect();
+        let mut spans = Vec::new();
+        let mut pending = String::new();
+        let mut index = 0usize;
+        let max_len = self.chunk_len().clamp(1, MAX_EXPLICIT_SEGMENT_CHARS);
+
+        while index < chars.len() {
+            let suffix: String = chars[index..].iter().collect();
+            if let Some(dict_reading) = self.longest_system_reading_prefix(&suffix) {
+                if !pending.is_empty() {
+                    spans.push(ReadingSpan {
+                        reading: std::mem::take(&mut pending),
+                        fixed_surface: None,
+                    });
+                }
+                let len = dict_reading.chars().count();
+                spans.push(ReadingSpan {
+                    reading: dict_reading,
+                    fixed_surface: None,
+                });
+                index += len;
+                continue;
+            }
+
+            pending.push(chars[index]);
+            index += 1;
+            if pending.chars().count() >= max_len {
+                spans.push(ReadingSpan {
+                    reading: std::mem::take(&mut pending),
+                    fixed_surface: None,
+                });
+            }
+        }
+
+        if !pending.is_empty() {
+            spans.push(ReadingSpan {
+                reading: pending,
+                fixed_surface: None,
+            });
+        }
+
+        spans
+    }
+
+    fn split_reading_spans_preserving_user_dict(
+        &self,
+        reading: &str,
+        split_free: bool,
+    ) -> Vec<ReadingSpan> {
+        let chars: Vec<char> = reading.chars().collect();
+        let mut spans = Vec::new();
+        let mut pending = String::new();
+        let mut index = 0usize;
+
+        while index < chars.len() {
+            let suffix: String = chars[index..].iter().collect();
+            if let Some((dict_reading, surface)) = self.longest_user_dict_prefix(&suffix) {
+                if !pending.is_empty() {
+                    if split_free {
+                        spans.extend(self.split_free_reading_segments(&pending));
+                    } else {
+                        spans.push(ReadingSpan {
+                            reading: std::mem::take(&mut pending),
+                            fixed_surface: None,
+                        });
+                    }
+                    pending.clear();
+                }
+                let len = dict_reading.chars().count();
+                spans.push(ReadingSpan {
+                    reading: dict_reading,
+                    fixed_surface: Some(surface),
+                });
+                index += len;
+            } else {
+                pending.push(chars[index]);
+                index += 1;
+            }
+        }
+
+        if !pending.is_empty() {
+            if split_free {
+                spans.extend(self.split_free_reading_segments(&pending));
+            } else {
+                spans.push(ReadingSpan {
+                    reading: pending,
+                    fixed_surface: None,
+                });
+            }
+        }
+        spans
+    }
+
+    pub(super) fn user_dictionary_auto_text(&self, reading: &str) -> Option<String> {
+        let spans = self.split_reading_spans_preserving_user_dict(reading, false);
+        let mut text = String::new();
+        let mut has_fixed_span = false;
+        for span in spans {
+            if let Some(surface) = span.fixed_surface {
+                has_fixed_span = true;
+                text.push_str(&surface);
+            } else {
+                text.push_str(&span.reading);
+            }
+        }
+        has_fixed_span.then_some(text)
+    }
+
+    pub(super) fn conservative_auto_convert_reading(
+        &mut self,
+        reading: &str,
+        lctx: &str,
+    ) -> String {
+        let spans = self.split_reading_spans_preserving_user_dict(reading, false);
+        if spans.is_empty() {
+            return reading.to_string();
+        }
+
+        let mut converted = String::new();
+        for span in spans {
+            if let Some(surface) = span.fixed_surface {
+                converted.push_str(&surface);
+                continue;
+            }
+
+            let ctx = self.truncate_context(&format!("{lctx}{converted}"));
+            let text = self
+                .run_kana_kanji_conversion(&span.reading, &ctx, 1)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| span.reading.clone());
+            if suspicious_auto_conversion(&span.reading, &text) {
+                converted.push_str(&span.reading);
+            } else {
+                converted.push_str(&text);
+            }
+        }
+        converted
+    }
+
+    fn build_initial_conversion_segment(
+        &mut self,
+        reading: &str,
+        prev_suggest_text: &str,
+        skip_learning: bool,
+    ) -> Vec<ConversionSegment> {
+        let preferred = (!prev_suggest_text.is_empty()).then_some(prev_suggest_text);
+        let candidates =
+            self.candidate_list_for_conversion_segment(reading, preferred, skip_learning);
+        (!candidates.is_empty())
+            .then_some(ConversionSegment {
+                reading: reading.to_string(),
+                candidates,
+            })
+            .into_iter()
+            .collect()
+    }
+
+    fn build_navigation_segments(
+        &mut self,
+        reading: &str,
+        current_surface: &str,
+    ) -> Vec<ConversionSegment> {
+        let mut spans = self.split_reading_spans_preserving_user_dict(reading, true);
+        if !current_surface.is_empty() && current_surface != reading {
+            spans = coalesce_spans_to_surface_len(spans, current_surface);
+        }
+        if spans.len() <= 1 {
+            return vec![];
+        }
+        let current_surfaces = (!current_surface.is_empty() && current_surface != reading)
+            .then(|| split_surface_preserving_fixed_spans(current_surface, &spans));
+
+        spans
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, span)| {
+                let preferred = span.fixed_surface.as_deref().or_else(|| {
+                    current_surfaces
+                        .as_ref()
+                        .and_then(|surfaces| surfaces.get(idx))
+                        .and_then(|surface| surface.as_deref())
+                });
+                let candidates =
+                    self.candidate_list_for_conversion_segment(&span.reading, preferred, false);
+                (!candidates.is_empty()).then_some(ConversionSegment {
+                    reading: span.reading,
+                    candidates,
+                })
+            })
+            .collect()
     }
 
     /// Search user and system dictionaries for candidates matching a reading.
@@ -327,7 +790,7 @@ impl InputMethodEngine {
     /// with deduplication. Uses dynamic candidate count based on input token
     /// count for performance.
     ///
-    /// Priority: Learning → User Dictionary → Model → System Dictionary → Fallback
+    /// Priority: User Dictionary → Learning → Model → System Dictionary → Fallback
     ///
     /// `skip_learning` suppresses the learning-cache step (1). Used by the Tab
     /// key path so users can escape a noisy learning history without losing
@@ -354,29 +817,28 @@ impl InputMethodEngine {
         let hiragana = reading.to_string();
         let katakana = karukan_engine::hiragana_to_katakana(reading);
 
-        // Priority: Learning → User Dictionary → Model → System Dictionary → Fallback
+        // Priority: User Dictionary → Learning → Model → System Dictionary → Fallback
         let mut builder = CandidateBuilder::new();
+        let dict_results = self.search_dictionaries(reading, usize::MAX);
 
-        // 1. Learning cache candidates (highest priority).
-        //    Force-inserted so they win against duplicate text from later sources.
-        //    Skipped when the caller asks for a learning-free conversion (Tab key).
+        // 1. User dictionary candidates. Explicit user registrations should
+        //    win over learned history and duplicate text from later sources.
+        for ac in &dict_results {
+            if ac.source == CandidateSource::UserDictionary {
+                builder.push(ac.clone());
+            }
+        }
+
+        // 2. Learning cache candidates. Skipped when the caller asks for a
+        //    learning-free conversion (Tab key).
         if !skip_learning {
             for c in self.lookup_learning_candidates(reading) {
                 // Exact matches have reading == input reading; use None to avoid redundancy
                 let cand_reading = c.reading.filter(|r| r != reading);
-                builder.push_force(
+                builder.push(
                     AnnotatedCandidate::new(c.text, CandidateSource::Learning)
                         .with_reading(cand_reading),
                 );
-            }
-        }
-
-        // 2. Dictionary candidates (user dict first, then system dict)
-        let dict_results = self.search_dictionaries(reading, usize::MAX);
-        // Insert user dictionary entries at the top (after learning)
-        for ac in &dict_results {
-            if ac.source == CandidateSource::UserDictionary {
-                builder.push(ac.clone());
             }
         }
 
@@ -511,6 +973,11 @@ impl InputMethodEngine {
             if full_reading == reading {
                 continue;
             }
+            if full_reading.chars().count() > MAX_LEARNING_PREFIX_READING_CHARS
+                || surface.chars().count() > MAX_LEARNING_PREFIX_SURFACE_CHARS
+            {
+                continue;
+            }
             if seen.insert(surface.clone()) {
                 candidates.push(Candidate {
                     text: surface,
@@ -522,21 +989,6 @@ impl InputMethodEngine {
         }
 
         candidates
-    }
-
-    /// Look up dictionary candidates for a reading (1 page, for live conversion display)
-    ///
-    /// Searches user dictionary first, then system dictionary.
-    pub(super) fn lookup_dict_candidates(&self, reading: &str) -> Vec<Candidate> {
-        self.search_dictionaries(reading, CandidateList::DEFAULT_PAGE_SIZE)
-            .into_iter()
-            .map(|ac| Candidate {
-                text: ac.text,
-                reading: Some(reading.to_string()),
-                source_label: Some(ac.source.label().to_string()),
-                description: None,
-            })
-            .collect()
     }
 
     /// Build rule-based rewriter variants for the reading itself (e.g. for
@@ -580,6 +1032,8 @@ impl InputMethodEngine {
             Keysym::ESCAPE => self.cancel_conversion(),
             Keysym::SPACE | Keysym::DOWN | Keysym::TAB => self.next_candidate(),
             Keysym::UP => self.prev_candidate(),
+            Keysym::LEFT => self.prev_conversion_segment(),
+            Keysym::RIGHT => self.next_conversion_segment(),
             Keysym::PAGE_DOWN => self.next_candidate_page(),
             Keysym::PAGE_UP => self.prev_candidate_page(),
             Keysym::BACKSPACE => self.backspace_conversion(),
@@ -611,13 +1065,21 @@ impl InputMethodEngine {
         }
     }
 
-    /// Get selected text and reading from conversion state, or None if not in conversion
-    fn selected_conversion_info(&self) -> Option<(String, Option<String>)> {
+    /// Get selected text/readings from conversion state, or None if not in conversion.
+    fn selected_conversion_info(&self) -> Option<(String, Vec<(String, String)>)> {
         match &self.state {
-            InputState::Conversion { candidates, .. } => {
-                let text = candidates.selected_text().unwrap_or("").to_string();
-                let reading = candidates.selected().and_then(|c| c.reading.clone());
-                Some((text, reading))
+            InputState::Conversion { segments, .. } => {
+                let mut text = String::new();
+                let mut selections = Vec::with_capacity(segments.len());
+                for segment in segments {
+                    let selected = segment.candidates.selected().cloned().unwrap_or_else(|| {
+                        Candidate::with_reading(&segment.reading, &segment.reading)
+                    });
+                    text.push_str(&selected.text);
+                    let reading = selected.reading.unwrap_or_else(|| segment.reading.clone());
+                    selections.push((reading, selected.text));
+                }
+                Some((text, selections))
             }
             _ => None,
         }
@@ -630,9 +1092,38 @@ impl InputMethodEngine {
         }
     }
 
+    fn record_conversion_learning(&mut self, selections: &[(String, String)]) {
+        if self.input_mode == InputMode::Emoji {
+            return;
+        }
+        for (reading, text) in selections {
+            self.record_learning(reading, text);
+        }
+    }
+
+    /// Advance the cached editor context after committing text and starting a
+    /// new composition in the same key event. Frontends cannot refresh their
+    /// surrounding-text snapshot between those two operations, so without
+    /// this the new word would be converted against context from before the
+    /// just-committed text.
+    fn advance_surrounding_context_after_commit(&mut self, committed: &str) {
+        let (mut left, right) = self
+            .surrounding_context
+            .as_ref()
+            .map(|ctx| {
+                (
+                    ctx.left.clone().unwrap_or_default(),
+                    ctx.right.clone().unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default();
+        left.push_str(committed);
+        self.set_surrounding_context(&left, &right);
+    }
+
     /// Commit the current conversion
     fn commit_conversion(&mut self) -> EngineResult {
-        let Some((text, reading)) = self.selected_conversion_info() else {
+        let Some((text, selections)) = self.selected_conversion_info() else {
             return EngineResult::not_consumed();
         };
 
@@ -640,17 +1131,12 @@ impl InputMethodEngine {
             return EngineResult::consumed();
         }
 
-        // Skip learning when the buffer is a `:shortcode` query — the
-        // reading would be e.g. `:smile`, which isn't a hiragana key
-        // and would corrupt the kana-keyed learning cache.
-        if self.input_mode != InputMode::Emoji
-            && let Some(reading) = &reading
-        {
-            self.record_learning(reading, &text);
-        }
+        self.record_conversion_learning(&selections);
 
         self.state = InputState::Empty;
         self.input_buf.text.clear();
+        self.live.text.clear();
+        self.chunks.clear();
         self.exit_emoji_mode();
 
         EngineResult::consumed()
@@ -662,19 +1148,19 @@ impl InputMethodEngine {
 
     /// Commit current conversion and then process a new character as fresh input
     fn commit_conversion_and_continue(&mut self, ch: char) -> EngineResult {
-        let Some((text, reading)) = self.selected_conversion_info() else {
+        let Some((text, selections)) = self.selected_conversion_info() else {
             return EngineResult::not_consumed();
         };
 
-        if self.input_mode != InputMode::Emoji
-            && let Some(reading) = &reading
-        {
-            self.record_learning(reading, &text);
-        }
+        self.record_conversion_learning(&selections);
 
         self.state = InputState::Empty;
         self.input_buf.text.clear();
+        self.live.text.clear();
+        self.chunks.clear();
         self.exit_emoji_mode();
+
+        self.advance_surrounding_context_after_commit(&text);
 
         // Start new input with the character
         let new_input_result = self.start_input(ch);
@@ -724,15 +1210,30 @@ impl InputMethodEngine {
 
     /// Navigate candidates with the given operation, then update preedit
     fn navigate_candidate(&mut self, op: impl FnOnce(&mut CandidateList) -> bool) -> EngineResult {
-        let (selected_text, candidates) = {
-            let Some(candidates) = self.state.candidates_mut() else {
+        let (preedit, candidates, reading) = {
+            let InputState::Conversion {
+                preedit,
+                candidates,
+                segments,
+                active_segment,
+            } = &mut self.state
+            else {
                 return EngineResult::not_consumed();
             };
             op(candidates);
-            let text = candidates.selected_text().unwrap_or("").to_string();
-            (text, candidates.clone())
+            if let Some(segment) = segments.get_mut(*active_segment) {
+                segment.candidates = candidates.clone();
+            }
+            let new_preedit =
+                Self::build_conversion_preedit_from_segments(segments, *active_segment);
+            *preedit = new_preedit.clone();
+            let reading = segments
+                .get(*active_segment)
+                .map(|s| s.reading.clone())
+                .unwrap_or_default();
+            (new_preedit, candidates.clone(), reading)
         };
-        self.update_conversion_preedit(&selected_text, &candidates)
+        self.conversion_update_result(preedit, candidates, &reading)
     }
 
     /// Select next candidate
@@ -755,6 +1256,89 @@ impl InputMethodEngine {
         self.navigate_candidate(CandidateList::prev_page)
     }
 
+    pub(super) fn start_segment_navigation(&mut self, delta: isize) -> EngineResult {
+        let start_result = self.start_conversion(false);
+        if !matches!(self.state, InputState::Conversion { .. }) {
+            return start_result;
+        }
+        let move_result = self.move_conversion_segment(delta);
+        if move_result.actions.is_empty() {
+            start_result
+        } else {
+            move_result
+        }
+    }
+
+    fn move_conversion_segment(&mut self, delta: isize) -> EngineResult {
+        if matches!(
+            &self.state,
+            InputState::Conversion { segments, .. } if segments.len() <= 1
+        ) {
+            let current_surface = self
+                .selected_conversion_info()
+                .map(|(text, _)| text)
+                .unwrap_or_default();
+            let reading = self.input_buf.text.clone();
+            let new_segments = self.build_navigation_segments(&reading, &current_surface);
+            if new_segments.len() > 1 {
+                let len = new_segments.len() as isize;
+                let active_segment = if delta >= 0 {
+                    1.min(new_segments.len() - 1)
+                } else {
+                    (len - 1) as usize
+                };
+                let candidates = new_segments[active_segment].candidates.clone();
+                let preedit =
+                    Self::build_conversion_preedit_from_segments(&new_segments, active_segment);
+                let reading = new_segments[active_segment].reading.clone();
+                self.state = InputState::Conversion {
+                    preedit: preedit.clone(),
+                    candidates: candidates.clone(),
+                    segments: new_segments,
+                    active_segment,
+                };
+                return self.conversion_update_result(preedit, candidates, &reading);
+            }
+        }
+
+        let (preedit, candidates, reading) = {
+            let InputState::Conversion {
+                preedit,
+                candidates,
+                segments,
+                active_segment,
+            } = &mut self.state
+            else {
+                return EngineResult::not_consumed();
+            };
+
+            if segments.len() <= 1 {
+                return EngineResult::consumed();
+            }
+
+            let len = segments.len() as isize;
+            let next = (*active_segment as isize + delta).rem_euclid(len) as usize;
+            *active_segment = next;
+            *candidates = segments[next].candidates.clone();
+            let new_preedit = Self::build_conversion_preedit_from_segments(segments, next);
+            *preedit = new_preedit.clone();
+            (
+                new_preedit,
+                candidates.clone(),
+                segments[next].reading.clone(),
+            )
+        };
+        self.conversion_update_result(preedit, candidates, &reading)
+    }
+
+    fn next_conversion_segment(&mut self) -> EngineResult {
+        self.move_conversion_segment(1)
+    }
+
+    fn prev_conversion_segment(&mut self) -> EngineResult {
+        self.move_conversion_segment(-1)
+    }
+
     /// Select and commit the candidate at `page_index` (0-based) within the
     /// current page, like pressing the digit key `page_index + 1`. Not
     /// consumed unless a candidate list is active (Conversion state).
@@ -768,29 +1352,47 @@ impl InputMethodEngine {
 
     /// Select candidate by digit (1-9)
     fn select_candidate_by_digit(&mut self, digit: usize) -> EngineResult {
-        let (selected_text, reading) = {
-            let candidates = match self.state.candidates_mut() {
-                Some(c) => c,
-                None => return EngineResult::not_consumed(),
+        let selections = {
+            let InputState::Conversion {
+                candidates,
+                segments,
+                active_segment,
+                ..
+            } = &mut self.state
+            else {
+                return EngineResult::not_consumed();
             };
 
             if candidates.select_on_page(digit).is_none() {
                 return EngineResult::consumed();
             }
 
-            let text = candidates.selected_text().unwrap_or("").to_string();
-            let reading = candidates.selected().and_then(|c| c.reading.clone());
-            (text, reading)
-        };
+            if let Some(segment) = segments.get_mut(*active_segment) {
+                segment.candidates = candidates.clone();
+            }
 
-        // Record learning before committing
-        if let Some(reading) = &reading {
-            self.record_learning(reading, &selected_text);
-        }
+            segments
+                .iter()
+                .map(|segment| {
+                    let selected = segment.candidates.selected().cloned().unwrap_or_else(|| {
+                        Candidate::with_reading(&segment.reading, &segment.reading)
+                    });
+                    let reading = selected.reading.unwrap_or_else(|| segment.reading.clone());
+                    (reading, selected.text)
+                })
+                .collect::<Vec<_>>()
+        };
+        let selected_text: String = selections.iter().map(|(_, text)| text.as_str()).collect();
+
+        self.record_conversion_learning(&selections);
 
         // Commit immediately after digit selection
 
         self.state = InputState::Empty;
+        self.input_buf.clear();
+        self.live.text.clear();
+        self.chunks.clear();
+        self.exit_emoji_mode();
 
         EngineResult::consumed()
             .with_action(EngineAction::UpdatePreedit(Preedit::new()))
@@ -799,33 +1401,18 @@ impl InputMethodEngine {
             .with_action(EngineAction::Commit(selected_text))
     }
 
-    /// Update preedit after candidate selection change
-    fn update_conversion_preedit(
-        &mut self,
-        selected_text: &str,
-        candidates: &CandidateList,
+    /// Build UI update actions after conversion state changed.
+    fn conversion_update_result(
+        &self,
+        preedit: Preedit,
+        candidates: CandidateList,
+        reading: &str,
     ) -> EngineResult {
-        let mut preedit = Preedit::with_text(selected_text);
-        preedit.set_attributes(vec![PreeditAttribute::new(
-            0,
-            selected_text.chars().count(),
-            AttributeType::Highlight,
-        )]);
-
-        if let Some(p) = self.state.preedit_mut() {
-            *p = preedit.clone();
-        }
-
-        let reading = candidates
-            .selected()
-            .and_then(|c| c.reading.as_deref())
-            .unwrap_or("");
-
         EngineResult::consumed()
             .with_action(EngineAction::UpdatePreedit(preedit))
             .with_action(EngineAction::ShowCandidates(candidates.clone()))
             .with_action(EngineAction::UpdateAuxText(
-                self.format_aux_conversion_with_page(reading, Some(candidates)),
+                self.format_aux_conversion_with_page(reading, Some(&candidates)),
             ))
     }
 
@@ -833,5 +1420,29 @@ impl InputMethodEngine {
     fn backspace_conversion(&mut self) -> EngineResult {
         // Return to hiragana mode with the reading
         self.cancel_conversion()
+    }
+}
+
+#[cfg(test)]
+mod conservative_auto_conversion_tests {
+    use super::suspicious_auto_conversion;
+
+    #[test]
+    fn rejects_latin_hallucinations_for_hiragana_readings() {
+        assert!(suspicious_auto_conversion("あい", "I"));
+        assert!(suspicious_auto_conversion("えーあい", "AI"));
+    }
+
+    #[test]
+    fn accepts_japanese_and_numeric_surfaces() {
+        assert!(!suspicious_auto_conversion("あい", "愛"));
+        assert!(!suspicious_auto_conversion(
+            "ぷろぐらむしょぞく",
+            "プログラム所属"
+        ));
+        assert!(!suspicious_auto_conversion(
+            "にせんにじゅうろくねん",
+            "2026年"
+        ));
     }
 }

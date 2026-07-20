@@ -62,8 +62,8 @@ fn conversion_state_texts(engine: &InputMethodEngine) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Texts from the most recent ShowCandidates action (auto-suggest path).
-fn auto_suggest_texts(result: &EngineResult) -> Vec<String> {
+/// Texts from the most recent ShowCandidates action.
+fn shown_candidate_texts(result: &EngineResult) -> Vec<String> {
     result
         .actions
         .iter()
@@ -286,18 +286,22 @@ fn katakana_variants_carry_width_form_description() {
 // ---------- end-to-end key flow ----------
 
 #[test]
-fn typing_three_dots_emits_ellipsis_in_auto_suggest_and_conversion() {
+fn typing_three_dots_waits_until_space_to_show_ellipsis_candidate() {
     // Regression: typing `.` `.` `.` should populate `。。。` and surface `…`
-    // both in the auto-suggest list (before Space) and in the conversion
-    // candidate list (after Space).
+    // in the conversion candidate list after Space, without showing composing
+    // candidates before the user explicitly starts conversion.
     let mut engine = InputMethodEngine::new();
     type_string(&mut engine, "..");
     let final_result = engine.process_key(&press('.'));
     assert_eq!(engine.input_buf.text, "。。。");
 
-    assert_contains(&auto_suggest_texts(&final_result), "…");
+    assert!(
+        shown_candidate_texts(&final_result).is_empty(),
+        "composing should not show conversion candidates before Space"
+    );
 
-    engine.process_key(&press_key(Keysym::SPACE));
+    let result = engine.process_key(&press_key(Keysym::SPACE));
+    assert_contains(&shown_candidate_texts(&result), "…");
     assert_contains(&conversion_state_texts(&engine), "…");
 }
 

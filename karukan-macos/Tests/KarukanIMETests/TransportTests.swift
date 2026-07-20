@@ -89,3 +89,14 @@ final class TransportTests: XCTestCase {
         XCTAssertNotNil(data)
     }
 }
+
+final class EngineProcessFailureTests: XCTestCase {
+    func testMissingServerDoesNotPublishPipesAndCanStopPendingRetry() {
+        let process = EngineProcess(serverPath: "/path/that/does/not/exist/karukan-imserver")
+
+        XCTAssertFalse(process.start())
+        XCTAssertNil(process.stdinPipe)
+        XCTAssertNil(process.stdoutPipe)
+        process.stop()
+    }
+}

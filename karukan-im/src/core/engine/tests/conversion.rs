@@ -1,4 +1,50 @@
 use super::*;
+use crate::core::state::ConversionSegment;
+use karukan_engine::Dictionary;
+use std::io::Write;
+
+fn user_dict_with(reading: &str, surface: &str) -> Dictionary {
+    user_dict_with_entries(&[(reading, surface)])
+}
+
+fn user_dict_with_entries(entries: &[(&str, &str)]) -> Dictionary {
+    let mut tmp = tempfile::NamedTempFile::new().unwrap();
+    let entries = entries
+        .iter()
+        .map(|(reading, surface)| {
+            format!(
+                r#"{{"reading":"{reading}","candidates":[{{"surface":"{surface}","score":1.0}}]}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let json = format!("[{entries}]");
+    tmp.write_all(json.as_bytes()).unwrap();
+    tmp.flush().unwrap();
+    Dictionary::build_from_json(tmp.path()).unwrap()
+}
+
+fn visible_preedit_text(engine: &InputMethodEngine) -> String {
+    engine.preedit().unwrap().text().replace('\u{200B}', "")
+}
+
+fn navigate_active_candidate_to(engine: &mut InputMethodEngine, expected: &str) {
+    let (cursor, target, len) = match engine.state() {
+        InputState::Conversion { candidates, .. } => (
+            candidates.cursor(),
+            candidates
+                .candidates()
+                .iter()
+                .position(|candidate| candidate.text == expected)
+                .unwrap_or_else(|| panic!("candidate {expected:?} not found")),
+            candidates.len(),
+        ),
+        _ => panic!("expected conversion state"),
+    };
+    for _ in 0..(target + len - cursor) % len {
+        engine.process_key(&press_key(Keysym::SPACE));
+    }
+}
 
 #[test]
 fn test_conversion_char_commits_and_continues() {
@@ -68,4 +114,296 @@ fn test_alphabet_mode_space_inserts_literal_space() {
     engine.process_key(&press('r'));
     engine.process_key(&press('k'));
     assert_eq!(engine.preedit().unwrap().text(), "New york");
+}
+
+#[test]
+fn test_conversion_can_select_candidates_per_segment() {
+    let mut engine = InputMethodEngine::with_config(EngineConfig {
+        composing_chunk_len: 2,
+        ..EngineConfig::default()
+    });
+
+    for ch in ['a', 'i', 'u', 'e'] {
+        engine.process_key(&press(ch));
+    }
+    engine.process_key(&press_key(Keysym::SPACE));
+
+    let InputState::Conversion {
+        segments,
+        active_segment,
+        ..
+    } = engine.state()
+    else {
+        panic!("expected conversion state");
+    };
+    assert_eq!(*active_segment, 0);
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].reading, "あいうえ");
+    assert_eq!(engine.preedit().unwrap().text(), "あいうえ");
+
+    // Select the katakana fallback by value. Model candidates and their order
+    // can change independently of this segmentation behavior.
+    navigate_active_candidate_to(&mut engine, "アイウエ");
+    assert_eq!(visible_preedit_text(&engine), "アイウエ");
+    assert_eq!(
+        engine
+            .preedit()
+            .unwrap()
+            .attributes()
+            .iter()
+            .filter(|a| a.attr_type == AttributeType::Highlight)
+            .map(|a| (a.start, a.end))
+            .collect::<Vec<_>>(),
+        vec![(0, 4)]
+    );
+
+    // Move right: this is when the underline is split into per-segment ranges.
+    // The visible conversion must remain katakana, not snap back to hiragana.
+    engine.process_key(&press_key(Keysym::RIGHT));
+    let InputState::Conversion {
+        segments,
+        active_segment,
+        ..
+    } = engine.state()
+    else {
+        panic!("expected conversion state");
+    };
+    assert_eq!(*active_segment, 1);
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].reading, "あい");
+    assert_eq!(segments[1].reading, "うえ");
+    assert_eq!(visible_preedit_text(&engine), "アイウエ");
+    assert_eq!(
+        engine
+            .preedit()
+            .unwrap()
+            .attributes()
+            .iter()
+            .filter(|a| a.attr_type == AttributeType::Highlight)
+            .map(|a| (a.start, a.end))
+            .collect::<Vec<_>>(),
+        vec![(3, 5)]
+    );
+
+    // Change only the active second segment, selecting by value rather than
+    // assuming it is exactly one Space after the model-dependent candidate.
+    navigate_active_candidate_to(&mut engine, "うえ");
+    assert_eq!(visible_preedit_text(&engine), "アイうえ");
+
+    let result = engine.process_key(&press_key(Keysym::RETURN));
+    assert!(
+        result
+            .actions
+            .iter()
+            .any(|a| { matches!(a, EngineAction::Commit(text) if text == "アイうえ") })
+    );
+}
+
+#[test]
+fn test_explicit_conversion_splits_short_sentence_at_particles() {
+    let mut engine = InputMethodEngine::new();
+    engine.dicts.system = Some(user_dict_with_entries(&[
+        ("きょう", "今日"),
+        ("いい", "良い"),
+        ("てんき", "天気"),
+    ]));
+    engine.input_buf.insert("きょうはいいてんき");
+
+    engine.start_conversion(false);
+
+    let InputState::Conversion { segments, .. } = engine.state() else {
+        panic!("expected conversion state");
+    };
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].reading, "きょうはいいてんき");
+
+    engine.process_key(&press_key(Keysym::RIGHT));
+
+    let InputState::Conversion {
+        segments,
+        active_segment,
+        ..
+    } = engine.state()
+    else {
+        panic!("expected conversion state");
+    };
+    assert_eq!(*active_segment, 1);
+    assert_eq!(
+        segments
+            .iter()
+            .map(|s| s.reading.as_str())
+            .collect::<Vec<_>>(),
+        vec!["きょう", "は", "いい", "てんき"]
+    );
+    assert_eq!(
+        engine
+            .preedit()
+            .unwrap()
+            .attributes()
+            .iter()
+            .filter(|a| a.attr_type == AttributeType::Highlight)
+            .map(|a| (a.start, a.end))
+            .collect::<Vec<_>>(),
+        vec![(4, 5)]
+    );
+}
+
+#[test]
+fn test_explicit_conversion_keeps_particles_separate_from_nouns() {
+    let mut engine = InputMethodEngine::new();
+    engine.dicts.system = Some(user_dict_with_entries(&[
+        ("だいがく", "大学"),
+        ("じゅぎょう", "授業"),
+        ("うける", "受ける"),
+    ]));
+    engine.input_buf.insert("だいがくのじゅぎょうをうける");
+
+    engine.start_conversion(false);
+    engine.process_key(&press_key(Keysym::RIGHT));
+
+    let InputState::Conversion { segments, .. } = engine.state() else {
+        panic!("expected conversion state");
+    };
+    assert_eq!(
+        segments
+            .iter()
+            .map(|s| s.reading.as_str())
+            .collect::<Vec<_>>(),
+        vec!["だいがく", "の", "じゅぎょう", "を", "うける"]
+    );
+}
+
+#[test]
+fn test_explicit_conversion_does_not_split_inside_dictionary_words() {
+    let mut engine = InputMethodEngine::new();
+    engine.dicts.system = Some(user_dict_with_entries(&[
+        ("どうさ", "動作"),
+        ("かくにん", "確認"),
+        ("かねて", "兼ねて"),
+        ("ためし", "試し"),
+        ("にゅうりょく", "入力"),
+    ]));
+    engine
+        .input_buf
+        .insert("どうさかくにんをかねてためしににゅうりょくしてみましょう");
+
+    engine.start_conversion(false);
+    engine.process_key(&press_key(Keysym::RIGHT));
+
+    let InputState::Conversion { segments, .. } = engine.state() else {
+        panic!("expected conversion state");
+    };
+    assert_eq!(
+        segments
+            .iter()
+            .map(|s| s.reading.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "どうさ",
+            "かくにん",
+            "を",
+            "かねて",
+            "ためし",
+            "に",
+            "にゅうりょく",
+            "してみましょう"
+        ]
+    );
+}
+
+#[test]
+fn test_segment_navigation_preserves_user_dictionary_span_without_duplication() {
+    let mut engine = InputMethodEngine::new();
+    engine.dicts.user = Some(user_dict_with("あい", "愛"));
+    engine.input_buf.insert("あいうえ");
+
+    // Supply the surface that was already displayed by live conversion. This
+    // isolates span preservation from the real model's whole-reading guess.
+    engine.live.text = "愛うえ".to_string();
+    engine.start_segment_navigation(1);
+
+    let InputState::Conversion {
+        segments,
+        active_segment,
+        ..
+    } = engine.state()
+    else {
+        panic!("expected conversion state");
+    };
+    assert_eq!(*active_segment, 1);
+    assert_eq!(
+        segments
+            .iter()
+            .map(|s| s.reading.as_str())
+            .collect::<Vec<_>>(),
+        vec!["あい", "うえ"]
+    );
+    assert_eq!(
+        segments[1].candidates.selected_text(),
+        Some("うえ"),
+        "the free span should keep the displayed surface while entering segment navigation; candidates={:?}",
+        segments[1]
+            .candidates
+            .candidates()
+            .iter()
+            .map(|candidate| candidate.text.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(visible_preedit_text(&engine), "愛うえ");
+}
+
+#[test]
+fn commit_and_continue_advances_surrounding_context() {
+    let mut engine = InputMethodEngine::new();
+    engine.config.max_api_context_len = 20;
+    engine.set_surrounding_context("前文", "右側");
+    engine.input_buf.insert("あい");
+
+    let candidates = CandidateList::from_strings_with_reading(["愛"], "あい");
+    let segments = vec![ConversionSegment {
+        reading: "あい".to_string(),
+        candidates: candidates.clone(),
+    }];
+    engine.state = InputState::Conversion {
+        preedit: Preedit::with_text("愛"),
+        candidates,
+        segments,
+        active_segment: 0,
+    };
+
+    let result = engine.process_key(&press('k'));
+
+    assert!(
+        result
+            .actions
+            .iter()
+            .any(|action| matches!(action, EngineAction::Commit(text) if text == "愛"))
+    );
+    let context = engine.surrounding_context.as_ref().unwrap();
+    assert_eq!(context.left.as_deref(), Some("前文愛"));
+    assert_eq!(context.right.as_deref(), Some("右側"));
+}
+
+#[test]
+fn test_segment_navigation_preserves_existing_prediction_surface() {
+    let mut engine = InputMethodEngine::new();
+    engine.input_buf.insert("きょうはいいてんき");
+    engine.live.text = "今日はいい天気".to_string();
+
+    engine.start_segment_navigation(1);
+
+    let InputState::Conversion {
+        segments,
+        active_segment,
+        ..
+    } = engine.state()
+    else {
+        panic!("expected conversion state");
+    };
+    assert_eq!(*active_segment, 1);
+    assert!(segments.len() > 1);
+    assert_eq!(visible_preedit_text(&engine), "今日はいい天気");
+
+    engine.process_key(&press_key(Keysym::RIGHT));
+    assert_eq!(visible_preedit_text(&engine), "今日はいい天気");
 }

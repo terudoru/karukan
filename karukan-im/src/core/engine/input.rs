@@ -2,119 +2,57 @@
 
 use super::*;
 
-/// Append candidates to `target`, skipping duplicates by text.
-fn append_candidates_dedup(target: &mut Vec<Candidate>, source: Vec<Candidate>) {
-    for c in source {
-        if !target.iter().any(|existing| existing.text == c.text) {
-            target.push(c);
-        }
-    }
-}
-
 impl InputMethodEngine {
-    /// Refresh the input state: rebuild preedit and run auto-suggest for candidates.
+    /// Refresh the input state after editing the composing buffer.
     pub(super) fn refresh_input_state(&mut self) -> EngineResult {
-        // Alphabet mode with active live conversion but no kana left to convert:
-        // preserve the existing conversion display without re-running the model.
-        // (When the buffer still contains kana we fall through and reconvert below,
-        // so a mixed reading like `きょうはABC` keeps live-converting.)
-        if self.input_mode == InputMode::Alphabet
-            && !self.live.text.is_empty()
-            && !karukan_engine::contains_kana(&self.input_buf.text)
-        {
-            let preedit = self.set_composing_state();
-            return EngineResult::consumed().with_action(EngineAction::UpdatePreedit(preedit));
-        }
-
-        // Run auto-suggest via chunked conversion. Normally skipped in alphabet
-        // mode (raw latin has no hiragana to convert), but if the buffer still
-        // contains kana — e.g. the user typed hiragana, switched to alphabet mode,
-        // and kept typing — keep converting the mixed reading so live conversion
-        // stays alive. `chunked_auto_suggest` splits long input into
-        // bounded-length chunks so per-keystroke latency stays flat; for input
-        // within one chunk this is identical to a whole-buffer call.
-        let convert = !self.input_buf.text.is_empty()
-            && (self.input_mode != InputMode::Alphabet
-                || karukan_engine::contains_kana(&self.input_buf.text));
-        let candidates = if convert {
-            let reading = self.input_buf.text.clone();
-            self.chunked_auto_suggest()
-                .map(|converted| (vec![converted], reading))
-        } else {
-            self.chunks.clear();
-            None
-        };
-
-        let Some((candidates, reading)) = candidates else {
-            // No useful AI suggestion — still show learning + dictionary + rule-based
-            // rewriter variants. The rewriter path produces mozc-style symbol variants
-            // (e.g. `「` → `『`, `【`, ...) for symbol-only inputs where the model is skipped.
-            self.live.text.clear();
-            let preedit = self.set_composing_state();
-            let reading = self.input_buf.text.clone();
-            let mut all_candidates = self.lookup_learning_candidates(&reading);
-            append_candidates_dedup(&mut all_candidates, self.lookup_dict_candidates(&reading));
-            append_candidates_dedup(&mut all_candidates, self.lookup_rewriter_variants(&reading));
-            if all_candidates.is_empty() {
-                return EngineResult::consumed()
-                    .with_action(EngineAction::UpdatePreedit(preedit))
-                    .with_action(EngineAction::HideCandidates)
-                    .with_action(EngineAction::UpdateAuxText(self.format_aux_composing()));
+        if self.input_mode != InputMode::Emoji {
+            let convert = !self.input_buf.text.is_empty()
+                && (self.input_mode != InputMode::Alphabet
+                    || karukan_engine::contains_kana(&self.input_buf.text));
+            if convert {
+                if self.live.enabled && self.input_mode != InputMode::Katakana {
+                    if let Some(converted) = self.chunked_auto_suggest() {
+                        if converted == self.input_buf.text {
+                            self.live.text.clear();
+                        } else {
+                            self.live.text = converted;
+                        }
+                    } else {
+                        self.live.text.clear();
+                    }
+                } else {
+                    // Space-before-candidates mode has nothing to display here.
+                    // Do not run neural inference only to discard its result.
+                    self.chunks.clear();
+                    self.live.text.clear();
+                }
+            } else {
+                self.chunks.clear();
+                self.live.text.clear();
             }
-            return EngineResult::consumed()
-                .with_action(EngineAction::UpdatePreedit(preedit))
-                .with_action(EngineAction::ShowCandidates(CandidateList::new(
-                    all_candidates,
-                )))
-                .with_action(EngineAction::UpdateAuxText(self.format_aux_composing()));
-        };
-
-        // Live conversion mode: show converted text in preedit
-        if self.live.enabled && self.input_mode != InputMode::Katakana {
-            self.live.text = candidates[0].clone();
             let preedit = self.set_composing_state();
-
-            // Same candidate ordering as normal auto-suggest (learning → model →
-            // dictionary). Including the model candidates guarantees the list is
-            // never empty, so the candidate window — whose aux line is where
-            // frontends show the raw reading once the preedit displays converted
-            // text — stays on screen for the whole live conversion.
-            let mut all_candidates = self.lookup_learning_candidates(&reading);
-            let model_candidates: Vec<Candidate> = candidates
-                .into_iter()
-                .map(|s| Candidate::with_reading(s, &reading))
-                .collect();
-            append_candidates_dedup(&mut all_candidates, model_candidates);
-            append_candidates_dedup(&mut all_candidates, self.lookup_dict_candidates(&reading));
-            let aux = self.format_aux_suggest(&self.input_buf.text.clone());
             return EngineResult::consumed()
                 .with_action(EngineAction::UpdatePreedit(preedit))
-                .with_action(EngineAction::ShowCandidates(CandidateList::new(
-                    all_candidates,
-                )))
-                .with_action(EngineAction::UpdateAuxText(aux));
+                .with_action(EngineAction::HideCandidates)
+                .with_action(EngineAction::UpdateAuxText(self.format_aux_composing()));
         }
 
-        // Normal auto-suggest: show hiragana preedit + learning/model/dict candidates
+        debug_assert_eq!(self.input_mode, InputMode::Emoji);
+        // Emoji shortcode input is ASCII and entirely rule-based. Running the
+        // kana-kanji model here only delays the picker and can trigger an
+        // unnecessary first-use model download.
+        self.chunks.clear();
         self.live.text.clear();
         let preedit = self.set_composing_state();
-        // Learning candidates first (highest priority)
-        let mut all_candidates = self.lookup_learning_candidates(&reading);
-        // Then model inference candidates
-        let model_candidates: Vec<Candidate> = candidates
-            .into_iter()
-            .map(|s| Candidate::with_reading(s, &reading))
-            .collect();
-        append_candidates_dedup(&mut all_candidates, model_candidates);
-        // Then dictionary candidates
-        append_candidates_dedup(&mut all_candidates, self.lookup_dict_candidates(&reading));
-        let aux = self.format_aux_suggest(&self.input_buf.text.clone());
-        EngineResult::consumed()
+        let candidates = self.lookup_rewriter_variants(&self.input_buf.text);
+        let result = EngineResult::consumed()
             .with_action(EngineAction::UpdatePreedit(preedit))
-            .with_action(EngineAction::ShowCandidates(CandidateList::new(
-                all_candidates,
-            )))
-            .with_action(EngineAction::UpdateAuxText(aux))
+            .with_action(EngineAction::UpdateAuxText(self.format_aux_composing()));
+        if candidates.is_empty() {
+            result.with_action(EngineAction::HideCandidates)
+        } else {
+            result.with_action(EngineAction::ShowCandidates(CandidateList::new(candidates)))
+        }
     }
 
     /// Process key in empty state
@@ -283,8 +221,8 @@ impl InputMethodEngine {
             // different conversion path — PredictAndConvert — in the same spirit).
             Keysym::TAB => self.start_conversion(true),
             Keysym::SPACE | Keysym::DOWN => self.start_conversion(false),
-            Keysym::LEFT => self.move_caret_left(),
-            Keysym::RIGHT => self.move_caret_right(),
+            Keysym::LEFT => self.start_segment_navigation(-1),
+            Keysym::RIGHT => self.start_segment_navigation(1),
             Keysym::HOME => self.move_caret_home(),
             Keysym::END => self.move_caret_end(),
             _ => {
