@@ -78,20 +78,20 @@ make test
 ## システム辞書のインストール
 
 モデル推論だけでは語彙が限られるため、システム辞書の併用を強く推奨します。
-`make install` 実行時に、辞書が未インストールであればGitHubリリースのビルド済み辞書
-(`dict.tgz`)を自動でダウンロードして配置します。既に
-`~/Library/Application Support/com.karukan.karukan-im/dict.bin` がある場合は
-何もしません(自前ビルドの辞書が上書きされることはありません)。
+`make install` 実行時に最新の公開辞書を確認し、サイズ・SHA-256・辞書形式を検証して
+安全に配置します。通常起動後もバックグラウンドで1日1回確認するため、再インストール
+しなくてもSudachiDict由来のシステム辞書を更新できます。更新失敗時は現在の辞書を維持し、
+更新前の辞書は `dict.bin.previous` に保存されます。
 
 手動でインストールする場合:
 
 ```bash
-curl -LO https://github.com/togatoga/karukan/releases/latest/download/dict.tgz
-tar xzf dict.tgz
-mkdir -p ~/Library/"Application Support"/com.karukan.karukan-im
-cp dict.bin ~/Library/"Application Support"/com.karukan.karukan-im/
-killall KarukanIME  # 起動中の場合は再起動して反映
+../target/release/karukan-imserver --update-dictionary
 ```
+
+手動更新後、起動中のKarukanに反映するには `killall KarukanIME` で再起動してください。
+
+独自の `conversion.dict_path`、ユーザー辞書、学習履歴は自動更新で上書きされません。
 
 辞書を自分でビルドする場合は [karukan-cli の README](../karukan-cli/README.md) を参照してください。
 

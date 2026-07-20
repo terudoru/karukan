@@ -1,0 +1,134 @@
+name: Update system dictionary
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/dictionary-update.yml
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dictionary-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find latest SudachiDict release
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_tag=$(gh api repos/WorksApplications/SudachiDict/releases/latest --jq .tag_name)
+          source_version=${source_tag#v}
+          current_source=$(jq -r '.source_version // ""' dictionary/manifest.json)
+          if [[ "$current_source" == "$source_tag" ]]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$source_tag" >> "$GITHUB_OUTPUT"
+          echo "version=$source_version" >> "$GITHUB_OUTPUT"
+
+      - name: Download official full dictionary sources
+        if: steps.source.outputs.needed == 'true'
+        shell: bash
+        env:
+          SUDACHI_VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dictionary-work/raw
+          base="https://sudachi.s3.ap-northeast-1.amazonaws.com/sudachidict-raw/$SUDACHI_VERSION"
+          for part in small core notcore; do
+            curl --fail --location --retry 4 --retry-all-errors \
+              --connect-timeout 30 --max-time 600 \
+              --output "dictionary-work/$part.zip" "$base/${part}_lex.zip"
+            unzip -q "dictionary-work/$part.zip" -d dictionary-work/raw
+          done
+          test -s dictionary-work/raw/small_lex.csv
+          test -s dictionary-work/raw/core_lex.csv
+          test -s dictionary-work/raw/notcore_lex.csv
+
+      - name: Build and validate Karukan dictionary
+        if: steps.source.outputs.needed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked --release -p karukan-cli --bin sudachi-dict -- \
+            dictionary-work/raw/small_lex.csv \
+            dictionary-work/raw/core_lex.csv \
+            dictionary-work/raw/notcore_lex.csv \
+            --output dictionary-work/scored.json
+          cargo run --locked --release -p karukan-cli --bin karukan-dict -- \
+            build dictionary-work/scored.json --output dictionary-work/dict.bin
+          cargo run --locked --release -p karukan-cli --bin karukan-dict -- \
+            view dictionary-work/dict.bin --query こんにちは > dictionary-work/query.tsv
+          test -s dictionary-work/query.tsv
+          awk -F '\t' '$1 == "こんにちは" { found = 1 } END { exit !found }' \
+            dictionary-work/query.tsv
+          cp LICENSE-APACHE dictionary-work/LICENSE-SudachiDict.txt
+          tar -czf dictionary-work/dict.tgz -C dictionary-work \
+            dict.bin LICENSE-SudachiDict.txt
+
+      - name: Publish versioned dictionary release
+        if: steps.source.outputs.needed == 'true'
+        id: publish
+        shell: bash
+        env:
+          SUDACHI_VERSION: ${{ steps.source.outputs.version }}
+          SUDACHI_TAG: ${{ steps.source.outputs.tag }}
+        run: |
+          set -euo pipefail
+          release_tag="dictionary-v$SUDACHI_VERSION"
+          archive=dictionary-work/dict.tgz
+          sha256=$(sha256sum "$archive" | awk '{print $1}')
+          size=$(stat -c '%s' "$archive")
+          asset_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/$release_tag/dict.tgz"
+
+          jq -n \
+            --arg version "sudachi-$SUDACHI_VERSION" \
+            --arg source_version "$SUDACHI_TAG" \
+            --arg url "$asset_url" \
+            --arg sha256 "$sha256" \
+            --argjson size "$size" \
+            '{schema_version: 1, version: $version, source_version: $source_version, url: $url, sha256: $sha256, size: $size, archive: "tar_gzip"}' \
+            > dictionary/manifest.json
+
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            gh release upload "$release_tag" "$archive" dictionary/manifest.json --clobber
+          else
+            gh release create "$release_tag" "$archive" dictionary/manifest.json \
+              --prerelease \
+              --title "System dictionary $SUDACHI_VERSION" \
+              --notes "Built from WorksApplications/SudachiDict $SUDACHI_TAG (Full: small + core + notcore). SudachiDict-derived dictionary data is distributed under Apache License 2.0."
+          fi
+
+          remote_digest=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/$release_tag" \
+            --jq '.assets[] | select(.name == "dict.tgz") | .digest')
+          test "$remote_digest" = "sha256:$sha256"
+
+      - name: Publish manifest on the default branch
+        if: steps.source.outputs.needed == 'true'
+        shell: bash
+        env:
+          SUDACHI_TAG: ${{ steps.source.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add dictionary/manifest.json
+          git commit -m "Update dictionary to $SUDACHI_TAG"
+          git push

@@ -17,6 +17,7 @@ mod types;
 pub use types::*;
 
 use input_buffer::InputBuffer;
+use std::sync::mpsc::Receiver;
 
 #[cfg(test)]
 mod tests;
@@ -31,6 +32,9 @@ use super::keycode::{KeyEvent, Keysym};
 use super::preedit::{AttributeType, Preedit, PreeditAttribute};
 use super::state::InputState;
 use crate::config::settings::Settings;
+use crate::dictionary_update::{
+    BackgroundDictionaryUpdate, DictionaryUpdateOutcome, spawn_background_update,
+};
 
 /// Source of a conversion candidate
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +157,8 @@ pub struct InputMethodEngine {
     dicts: Dictionaries,
     /// Learning cache (user conversion history)
     learning: Option<LearningCache>,
+    /// Result channel for the non-blocking system dictionary update check.
+    dictionary_update: Option<Receiver<Result<BackgroundDictionaryUpdate, String>>>,
 }
 
 impl InputMethodEngine {
@@ -176,6 +182,7 @@ impl InputMethodEngine {
             chunks: Vec::new(),
             dicts: Dictionaries::default(),
             learning: None,
+            dictionary_update: None,
         }
     }
 
@@ -438,6 +445,8 @@ impl InputMethodEngine {
 
     /// Process a key event
     pub fn process_key(&mut self, key: &KeyEvent) -> EngineResult {
+        self.poll_dictionary_update();
+
         // Log modifier key events for debugging key mapping issues
         if key.keysym.is_modifier() {
             debug!(

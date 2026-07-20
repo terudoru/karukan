@@ -44,6 +44,7 @@ impl InputMethodEngine {
         );
 
         self.init_system_dictionary(settings.conversion.dict_path.as_deref());
+        self.dictionary_update = spawn_background_update(settings);
         self.init_user_dictionaries();
         self.init_learning_cache(settings.learning.enabled, settings.learning.max_entries);
 
@@ -177,6 +178,60 @@ impl InputMethodEngine {
         }
     }
 
+    /// Apply a completed background dictionary update between key events.
+    pub(super) fn poll_dictionary_update(&mut self) {
+        let Some(receiver) = self.dictionary_update.as_ref() else {
+            return;
+        };
+        let results = match receiver.try_recv() {
+            Ok(first) => Some(
+                std::iter::once(first)
+                    .chain(receiver.try_iter())
+                    .collect::<Vec<_>>(),
+            ),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.dictionary_update = None;
+                return;
+            }
+        };
+        let Some(results) = results else {
+            return;
+        };
+
+        for result in results {
+            match result {
+                Ok(update) => match update.outcome {
+                    DictionaryUpdateOutcome::Updated { version, path } => {
+                        if let Some(dictionary) = update.dictionary {
+                            self.dicts.system = Some(dictionary);
+                            tracing::info!(
+                                "System dictionary hot-reloaded after update: {} ({})",
+                                version,
+                                path.display()
+                            );
+                        } else {
+                            tracing::warn!(
+                                "System dictionary update {version} completed without a loaded dictionary"
+                            );
+                        }
+                    }
+                    DictionaryUpdateOutcome::UpToDate { version } => {
+                        debug!("System dictionary is up to date: {}", version);
+                    }
+                    DictionaryUpdateOutcome::Skipped { reason } => {
+                        debug!("System dictionary update skipped: {}", reason);
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        "System dictionary update failed; keeping current dictionary: {error}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Initialize the learning cache from disk.
     ///
     /// Loads `~/.local/share/karukan-im/learning.tsv` if it exists.
@@ -287,5 +342,52 @@ impl InputMethodEngine {
                 debug!("Failed to merge user dictionaries: {}", e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod dictionary_update_tests {
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::dictionary_update::BackgroundDictionaryUpdate;
+
+    #[test]
+    fn completed_background_update_is_hot_reloaded() {
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("source.json");
+        std::fs::write(
+            &source,
+            r#"[{"reading":"さいしん","candidates":[{"surface":"最新","score":1.0}]}]"#,
+        )
+        .unwrap();
+        let dictionary = Dictionary::build_from_json(&source).unwrap();
+
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(BackgroundDictionaryUpdate {
+                outcome: DictionaryUpdateOutcome::Updated {
+                    version: "test-latest".to_string(),
+                    path: PathBuf::from("dict.bin"),
+                },
+                dictionary: Some(dictionary),
+            }))
+            .unwrap();
+
+        let mut engine = InputMethodEngine::new();
+        engine.dictionary_update = Some(receiver);
+        engine.poll_dictionary_update();
+
+        let result = engine
+            .dicts
+            .system
+            .as_ref()
+            .unwrap()
+            .exact_match_search("さいしん")
+            .unwrap();
+        assert_eq!(result.candidates[0].surface, "最新");
     }
 }

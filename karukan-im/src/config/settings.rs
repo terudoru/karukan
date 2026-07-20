@@ -21,6 +21,8 @@ pub struct Settings {
     pub conversion: ConversionSettings,
     /// Learning cache settings
     pub learning: LearningSettings,
+    /// Automatic system dictionary update settings
+    pub dictionary_update: DictionaryUpdateSettings,
 }
 
 /// Conversion strategy mode
@@ -79,6 +81,19 @@ pub struct LearningSettings {
     pub enabled: bool,
     /// Maximum number of total entries in the learning cache
     pub max_entries: usize,
+}
+
+/// Automatic system dictionary update settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DictionaryUpdateSettings {
+    /// Check for a new published dictionary in the background.
+    pub enabled: bool,
+    /// Minimum number of hours between successful update checks.
+    pub check_interval_hours: u64,
+    /// HTTPS endpoint returning a [`DictionaryManifest`](crate::dictionary_update::DictionaryManifest).
+    pub manifest_url: String,
+    /// Connect/read timeout for each HTTP operation.
+    pub timeout_seconds: u64,
 }
 
 impl Default for Settings {
@@ -215,6 +230,8 @@ mod tests {
         assert_eq!(settings.conversion.num_candidates, 9);
         assert!(settings.conversion.use_context);
         assert_eq!(settings.conversion.max_context_length, 10);
+        assert!(settings.dictionary_update.enabled);
+        assert_eq!(settings.dictionary_update.check_interval_hours, 24);
     }
 
     #[test]

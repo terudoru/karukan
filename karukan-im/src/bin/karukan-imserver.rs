@@ -9,6 +9,8 @@
 //! `--prefetch-models` downloads every conversion model listed in
 //! `models.toml` into the HuggingFace cache and exits (used by `make install`
 //! to avoid a multi-minute download on first launch).
+//! `--update-dictionary` performs an immediate verified system dictionary
+//! update and exits.
 
 use std::io::{BufRead, Write};
 
@@ -29,6 +31,26 @@ fn main() {
             std::process::exit(1);
         }
         return;
+    }
+
+    if std::env::args().any(|arg| arg == "--update-dictionary") {
+        let settings = match karukan_im::config::Settings::load() {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::error!("failed to load settings: {error:#}");
+                std::process::exit(1);
+            }
+        };
+        match karukan_im::dictionary_update::update_dictionary(&settings, true) {
+            Ok(outcome) => {
+                println!("Dictionary update {outcome}");
+                return;
+            }
+            Err(error) => {
+                tracing::error!("dictionary update failed: {error:#}");
+                std::process::exit(1);
+            }
+        }
     }
 
     let mut server = ImServer::new();

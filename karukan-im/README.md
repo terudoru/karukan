@@ -127,21 +127,31 @@ double-array trieベースのシステム辞書で、モデル推論に加えて
 - `dict_path` で任意のパスを指定可能
 - ファイルが存在しない場合は辞書なしで動作
 
-ビルド済みの辞書を以下からダウンロードして配置できます:
+デフォルトでは、起動後に最新の公開辞書をバックグラウンドで1日1回確認します。
+公開辞書はGitHub Actionsが[SudachiDict Full](https://github.com/WorksApplications/SudachiDict#dictionary-types)
+（small + core + notcore）の最新リリースを毎日確認し、新版があればビルド・検証して配布します。
+ダウンロードした辞書はサイズ・SHA-256・KRKN形式を検証し、正常な場合だけ
+`dict.bin` を原子的に置換します。入力中の通信待ちは発生せず、更新前の辞書は
+`dict.bin.previous` として残ります。
+
+直ちに手動更新する場合:
 
 ```bash
-# Linux
-wget https://github.com/togatoga/karukan/releases/download/v0.1.0/dict.tgz
-tar xzf dict.tgz
-mkdir -p ~/.local/share/karukan-im
-cp dict.bin ~/.local/share/karukan-im/
-
-# macOS
-curl -LO https://github.com/togatoga/karukan/releases/download/v0.1.0/dict.tgz
-tar xzf dict.tgz
-mkdir -p ~/Library/"Application Support"/com.karukan.karukan-im
-cp dict.bin ~/Library/"Application Support"/com.karukan.karukan-im/
+cargo run -p karukan-im --bin karukan-imserver -- --update-dictionary
 ```
+
+更新設定は `config.toml` の `[dictionary_update]` で変更できます。
+
+```toml
+[dictionary_update]
+enabled = true
+check_interval_hours = 24
+manifest_url = "https://raw.githubusercontent.com/togatoga/karukan/main/dictionary/manifest.json"
+timeout_seconds = 30
+```
+
+`conversion.dict_path` で独自のシステム辞書を指定した場合、自動更新はそのファイルを
+上書きしません。ユーザー辞書と学習キャッシュも更新対象外です。
 
 自分でビルドする場合は [karukan-cli の README](../karukan-cli/README.md) を参照してください。
 
@@ -152,6 +162,9 @@ cp dict.bin ~/Library/"Application Support"/com.karukan.karukan-im/
 - デフォルトパス: `~/.local/share/karukan-im/user_dicts/`（macOS: `~/Library/Application Support/com.karukan.karukan-im/user_dicts/`）
 - ディレクトリ内のファイルはすべて自動で読み込み（KRKNバイナリ・Mozc TSV を自動判定）
 - ディレクトリが存在しない場合はユーザー辞書なしで動作
+
+SudachiDictの次回リリースを待たずに使いたい新語・固有名詞は、ここへMozc TSV形式で
+追加すると次回のエンジン起動から優先候補として利用できます。
 
 変換候補の優先順位:
 

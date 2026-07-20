@@ -4,7 +4,6 @@ INSTALL_DIR = $(HOME)/Library/Input Methods
 CARGO_MANIFEST = ../Cargo.toml
 CARGO_TARGET = ../target
 DATA_DIR = $(HOME)/Library/Application Support/com.karukan.karukan-im
-DICT_URL = https://github.com/togatoga/karukan/releases/latest/download/dict.tgz
 
 .PHONY: all build build-universal bundle install install-dict install-models test fmt lint clean
 
@@ -45,22 +44,12 @@ bundle: build
 	cp -r resources/* $(APP)/Contents/Resources/
 	codesign --force --deep --sign - $(APP)
 
-# Download the prebuilt system dictionary unless one is already installed.
-# Non-fatal on failure (e.g. offline) — the IME works model-only without it.
-install-dict:
-	@if [ -f "$(DATA_DIR)/dict.bin" ]; then \
-		echo "System dictionary already installed: $(DATA_DIR)/dict.bin (skipping download)"; \
-	else \
-		echo "Downloading system dictionary from $(DICT_URL) ..."; \
-		tmp=$$(mktemp -d) && \
-		( curl -fL --progress-bar -o "$$tmp/dict.tgz" "$(DICT_URL)" && \
-		  tar xzf "$$tmp/dict.tgz" -C "$$tmp" && \
-		  mkdir -p "$(DATA_DIR)" && \
-		  cp "$$tmp/dict.bin" "$(DATA_DIR)/" && \
-		  echo "Installed system dictionary to $(DATA_DIR)/dict.bin" \
-		) || echo "WARNING: system dictionary install failed; install manually (see README)"; \
-		rm -rf "$$tmp"; \
-	fi
+# Check the published manifest and atomically install the newest
+# verified system dictionary. Non-fatal when offline; an existing dictionary
+# is kept unchanged.
+install-dict: build
+	@$(CARGO_TARGET)/release/karukan-imserver --update-dictionary || \
+		echo "WARNING: system dictionary update failed; keeping the current dictionary"
 
 # Prefetch the conversion models into the HuggingFace cache so the first
 # launch doesn't block for minutes on the download.

@@ -7,6 +7,7 @@
 
 pub mod config;
 pub mod core;
+pub mod dictionary_update;
 pub mod server;
 
 pub use core::engine::{EngineAction, EngineResult, InputMethodEngine};
