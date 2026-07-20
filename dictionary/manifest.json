@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "version": "karukan-v0.1.0",
-  "source_version": null,
-  "url": "https://github.com/togatoga/karukan/releases/download/v0.1.0/dict.tgz",
-  "sha256": "f194d2526bf826622bc5baf7c07e7525ad9bde2dc63896cd929045283a4aeccd",
-  "size": 74112307,
+  "version": "sudachi-20260428",
+  "source_version": "v20260428",
+  "url": "https://github.com/terudoru/karukan/releases/download/dictionary-v20260428/dict.tgz",
+  "sha256": "ced626be80a305f4d470ce457d29895ec8c6e231b617885e7c432440b59d8c75",
+  "size": 74139241,
   "archive": "tar_gzip"
 }
