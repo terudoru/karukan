@@ -36,6 +36,8 @@ live_conversion = true
 enabled = true
 # 学習エントリの最大数
 max_entries = 10000
+# 学習する変換結果の最大文字数
+max_surface_chars = 50
 
 [dictionary_update]
 # 公開済みの最新システム辞書をバックグラウンドで確認する
@@ -43,6 +45,6 @@ enabled = true
 # 更新確認の最短間隔（時間）。0にすると起動のたびに確認する
 check_interval_hours = 24
 # Karukanが公開する、バージョンとSHA-256を含む更新情報
-manifest_url = "https://raw.githubusercontent.com/togatoga/karukan/main/dictionary/manifest.json"
+manifest_url = "https://raw.githubusercontent.com/terudoru/karukan/main/dictionary/manifest.json"
 # 接続・読み込みごとのタイムアウト（秒）
 timeout_seconds = 30

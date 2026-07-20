@@ -2,29 +2,56 @@
 //!
 //! Handles the list of conversion candidates with pagination support.
 
+/// Source of a conversion candidate — which subsystem produced it.
+/// Presentation ([`label`](Self::label), [`is_deletable`](Self::is_deletable))
+/// is derived from this on read, never stored, so it can't fall out of sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateSource {
+    /// User dictionary lookup
+    UserDictionary,
+    /// Learning cache (user history)
+    Learning,
+    /// Model inference result
+    Model,
+    /// System dictionary lookup (also covers reading→symbol lookups via
+    /// mozc's symbol.tsv — they're treated as just another dictionary).
+    Dictionary,
+    /// Rewriter-generated variant (half-width katakana, symbol)
+    Rewriter,
+    /// Hiragana/katakana fallback
+    Fallback,
+}
+
+impl CandidateSource {
+    /// Aux-text label telling the user which subsystem produced the
+    /// candidate. Empty for sources that aren't worth calling out (Fallback).
+    pub fn label(&self) -> &'static str {
+        match self {
+            CandidateSource::UserDictionary => "\u{1F464} \u{30E6}\u{30FC}\u{30B6}\u{30FC}", // 👤 ユーザー
+            CandidateSource::Learning => "\u{1F4DD} \u{5B66}\u{7FD2}", // 📝 学習
+            CandidateSource::Model => "\u{1F916} AI",                  // 🤖 AI
+            CandidateSource::Dictionary => "\u{1F4DA} \u{8F9E}\u{66F8}", // 📚 辞書
+            CandidateSource::Rewriter => "\u{1F504} \u{5909}\u{63DB}", // 🔄 変換
+            CandidateSource::Fallback => "",
+        }
+    }
+
+    /// Whether candidates from this source can be removed from the learning
+    /// history with Ctrl+Backspace / Ctrl+Delete.
+    pub fn is_deletable(&self) -> bool {
+        matches!(self, CandidateSource::Learning)
+    }
+}
+
 /// A single conversion candidate.
-///
-/// Two distinct annotation slots are kept separate so the same description
-/// never appears in two places at once:
-///
-/// - `source_label` — shown in the aux text (after the model name) to tell
-///   the user which subsystem produced the candidate (`🤖 AI`, `📚 辞書`,
-///   `📝 学習`, `🔄 変換`, ...).
-/// - `description` — shown as the mozc-style right-side comment on the
-///   candidate itself, describing what the candidate *is* (symbol names like
-///   `三点リーダ`, rewriter variants like `[全]英大文字`).
-///
-/// Position within a `CandidateList` is tracked by the list itself; the
-/// candidate doesn't carry its own index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     /// The converted text
     pub text: String,
     /// The original reading (hiragana)
     pub reading: Option<String>,
-    /// Source label for the aux text slot (e.g. `🤖 AI`, `📚 辞書`).
-    /// `None` when the source has no label (Fallback).
-    pub source_label: Option<String>,
+    /// Which subsystem produced this candidate, if known.
+    pub source: Option<CandidateSource>,
     /// Per-candidate description shown as the right-side comment on the
     /// candidate (mozc-style). Only set when the candidate itself has a
     /// meaningful description — symbol descriptions like `三点リーダ`,
@@ -38,18 +65,28 @@ impl Candidate {
         Self {
             text: text.into(),
             reading: None,
-            source_label: None,
+            source: None,
             description: None,
         }
     }
 
     pub fn with_reading(text: impl Into<String>, reading: impl Into<String>) -> Self {
         Self {
-            text: text.into(),
             reading: Some(reading.into()),
-            source_label: None,
-            description: None,
+            ..Self::new(text)
         }
+    }
+
+    /// Aux-text source label (`🤖 AI`, `📚 辞書`, ...) derived from `source`;
+    /// `None` when the source is unknown or has no label.
+    pub fn source_label(&self) -> Option<&'static str> {
+        self.source.map(|s| s.label()).filter(|l| !l.is_empty())
+    }
+
+    /// Whether this candidate can be removed from the learning history with
+    /// Ctrl+Backspace / Ctrl+Delete. See [`CandidateSource::is_deletable`].
+    pub fn is_deletable(&self) -> bool {
+        self.source.is_some_and(|s| s.is_deletable())
     }
 }
 
@@ -94,8 +131,7 @@ impl CandidateList {
         Self::new(strings.into_iter().map(Candidate::new).collect())
     }
 
-    /// Create a candidate list from strings, attaching the same reading to
-    /// every candidate.
+    /// Create a candidate list whose entries share the same reading.
     pub fn from_strings_with_reading(
         strings: impl IntoIterator<Item = impl Into<String>>,
         reading: impl Into<String>,
@@ -104,7 +140,7 @@ impl CandidateList {
         Self::new(
             strings
                 .into_iter()
-                .map(|s| Candidate::with_reading(s, &reading))
+                .map(|text| Candidate::with_reading(text, &reading))
                 .collect(),
         )
     }
@@ -247,16 +283,6 @@ impl CandidateList {
         let absolute_index = self.page_start() + page_index - 1;
         if absolute_index < self.candidates.len() {
             self.cursor = absolute_index;
-            self.selected()
-        } else {
-            None
-        }
-    }
-
-    /// Select a candidate by absolute index
-    pub fn select(&mut self, index: usize) -> Option<&Candidate> {
-        if index < self.candidates.len() {
-            self.cursor = index;
             self.selected()
         } else {
             None

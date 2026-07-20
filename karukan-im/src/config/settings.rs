@@ -81,6 +81,10 @@ pub struct LearningSettings {
     pub enabled: bool,
     /// Maximum number of total entries in the learning cache
     pub max_entries: usize,
+    /// Maximum surface length (in characters) recorded into the learning
+    /// cache; longer conversion results (e.g. whole live-converted
+    /// sentences) are not learned
+    pub max_surface_chars: usize,
 }
 
 /// Automatic system dictionary update settings.
@@ -179,8 +183,7 @@ impl Settings {
         }
 
         debug!("Loading config from {:?}", config_file);
-        let content = fs::read_to_string(&config_file)?;
-        parse_with_defaults(&content)
+        Self::load_from(&config_file)
     }
 
     /// Load settings from a specific file, merged on top of defaults.
@@ -195,15 +198,8 @@ impl Settings {
             anyhow::bail!("Could not determine config directory");
         };
 
-        // Create config directory if it doesn't exist
-        if let Some(parent) = config_file.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
         debug!("Saving config to {:?}", config_file);
-        let content = toml::to_string_pretty(self)?;
-        fs::write(&config_file, content)?;
-        Ok(())
+        self.save_to(&config_file)
     }
 
     /// Save settings to a specific file
@@ -232,6 +228,28 @@ mod tests {
         assert_eq!(settings.conversion.max_context_length, 10);
         assert!(settings.dictionary_update.enabled);
         assert_eq!(settings.dictionary_update.check_interval_hours, 24);
+        assert!(settings.learning.enabled);
+        assert_eq!(settings.learning.max_entries, 10000);
+        assert_eq!(settings.learning.max_surface_chars, 50);
+    }
+
+    #[test]
+    fn test_learning_partial_config() {
+        // Overriding one learning key keeps the defaults for the others.
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+[learning]
+max_surface_chars = 10
+"#
+        )
+        .unwrap();
+
+        let settings = Settings::load_from(file.path()).unwrap();
+        assert_eq!(settings.learning.max_surface_chars, 10);
+        assert!(settings.learning.enabled);
+        assert_eq!(settings.learning.max_entries, 10000);
     }
 
     #[test]

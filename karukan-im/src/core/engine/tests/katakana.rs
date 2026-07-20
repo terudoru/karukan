@@ -43,7 +43,7 @@ fn test_ctrl_k_converts_to_katakana() {
     assert_eq!(engine.preedit().unwrap().text(), "アイウエオ");
     assert!(matches!(engine.state(), InputState::Composing { .. }));
     assert!(
-        engine.input_mode == InputMode::Katakana,
+        engine.mode.current() == InputMode::Katakana,
         "Should be in katakana mode"
     );
 
@@ -120,14 +120,14 @@ fn test_ctrl_k_uppercase_converts_to_katakana() {
     // Preedit should show katakana
     assert_eq!(engine.preedit().unwrap().text(), "アイウエオ");
     assert!(
-        engine.input_mode == InputMode::Katakana,
+        engine.mode.current() == InputMode::Katakana,
         "Should be in katakana mode"
     );
 
     // Type more → katakana mode persists (like alphabet mode)
     engine.process_key(&press('a'));
     assert!(
-        engine.input_mode == InputMode::Katakana,
+        engine.mode.current() == InputMode::Katakana,
         "Katakana mode should persist across input"
     );
     // Preedit should show katakana for the new input too
@@ -162,7 +162,7 @@ fn test_katakana_baked_on_switch_to_alphabet() {
 
     // Switch to alphabet mode via Shift+L → katakana should be baked in
     engine.process_key(&press_shift('L'));
-    assert!(engine.input_mode == InputMode::Alphabet);
+    assert!(engine.mode.current() == InputMode::Alphabet);
     // The katakana text should be preserved, not reverted to hiragana
     assert_eq!(engine.input_buf.text, "アイウエオL");
 
@@ -194,17 +194,17 @@ fn test_ctrl_k_is_one_way_to_katakana() {
         is_press: true,
     };
     engine.process_key(&ctrl_k);
-    assert!(engine.input_mode == InputMode::Katakana);
+    assert!(engine.mode.current() == InputMode::Katakana);
     assert_eq!(engine.preedit().unwrap().text(), "アイ");
 
     // Ctrl+K again → still katakana mode (not a toggle)
     engine.process_key(&ctrl_k);
-    assert!(engine.input_mode == InputMode::Katakana);
+    assert!(engine.mode.current() == InputMode::Katakana);
     assert_eq!(engine.preedit().unwrap().text(), "アイ");
 
     // Right Super → return to hiragana mode, katakana is baked in
     engine.process_key(&press_key(Keysym::SUPER_R));
-    assert!(engine.input_mode == InputMode::Hiragana);
+    assert!(engine.mode.current() == InputMode::Hiragana);
     assert_eq!(engine.input_buf.text, "アイ");
     assert_eq!(engine.preedit().unwrap().text(), "アイ");
 

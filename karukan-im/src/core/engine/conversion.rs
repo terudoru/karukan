@@ -482,15 +482,11 @@ impl InputMethodEngine {
         CandidateList::new(
             candidates
                 .into_iter()
-                .map(|ac| {
-                    let cand_reading = ac.reading.unwrap_or_else(|| reading.to_string());
-                    let label = ac.source.label();
-                    Candidate {
-                        text: ac.text,
-                        reading: Some(cand_reading),
-                        source_label: (!label.is_empty()).then(|| label.to_string()),
-                        description: ac.description,
-                    }
+                .map(|ac| Candidate {
+                    reading: Some(ac.reading.unwrap_or_else(|| reading.to_string())),
+                    text: ac.text,
+                    source: Some(ac.source),
+                    description: ac.description,
                 })
                 .collect(),
         )
@@ -848,7 +844,7 @@ impl InputMethodEngine {
             // after rewriters have run — otherwise `:smile` would be
             // pinned to the top of the candidate list as a Fallback
             // and outrank the 😄 we surface in step 5/6.
-            if builder.is_empty() && self.input_mode != InputMode::Emoji {
+            if builder.is_empty() && self.mode.current() != InputMode::Emoji {
                 builder.push(AnnotatedCandidate::new(
                     hiragana.clone(),
                     CandidateSource::Fallback,
@@ -882,7 +878,7 @@ impl InputMethodEngine {
             .converters
             .rewriters
             .rewrite_all(&[reading.to_string()]);
-        if self.input_mode == InputMode::Emoji {
+        if self.mode.current() == InputMode::Emoji {
             for (variant, description) in rewriter_variants {
                 builder.push(
                     AnnotatedCandidate::new(variant, CandidateSource::Rewriter)
@@ -948,7 +944,6 @@ impl InputMethodEngine {
         };
         let mut candidates: Vec<Candidate> = Vec::new();
         let mut seen = HashSet::new();
-        let label = CandidateSource::Learning.label().to_string();
 
         // Exact match
         for (surface, _score) in cache.lookup(reading) {
@@ -959,7 +954,7 @@ impl InputMethodEngine {
                 candidates.push(Candidate {
                     text: surface,
                     reading: Some(reading.to_string()),
-                    source_label: Some(label.clone()),
+                    source: Some(CandidateSource::Learning),
                     description: None,
                 });
             }
@@ -982,7 +977,7 @@ impl InputMethodEngine {
                 candidates.push(Candidate {
                     text: surface,
                     reading: Some(full_reading),
-                    source_label: Some(label.clone()),
+                    source: Some(CandidateSource::Learning),
                     description: None,
                 });
             }
@@ -995,7 +990,6 @@ impl InputMethodEngine {
     /// symbol input `「` → `『`, `【`, `（`, ...). Used in the auto-suggest path
     /// so users see mozc-style symbol variants without pressing Space first.
     pub(super) fn lookup_rewriter_variants(&self, reading: &str) -> Vec<Candidate> {
-        let source_label = CandidateSource::Rewriter.label().to_string();
         self.converters
             .rewriters
             .rewrite_all(&[reading.to_string()])
@@ -1003,7 +997,7 @@ impl InputMethodEngine {
             .map(|(text, description)| Candidate {
                 text,
                 reading: Some(reading.to_string()),
-                source_label: Some(source_label.clone()),
+                source: Some(CandidateSource::Rewriter),
                 description,
             })
             .collect()
@@ -1036,6 +1030,20 @@ impl InputMethodEngine {
             Keysym::RIGHT => self.next_conversion_segment(),
             Keysym::PAGE_DOWN => self.next_candidate_page(),
             Keysym::PAGE_UP => self.prev_candidate_page(),
+            // Ctrl+Backspace / Ctrl+Delete: delete the selected learning
+            // candidate from the history. Backspace doubles as Delete because
+            // the Mac "delete" key is Backspace. On a non-learning selection
+            // the chord is consumed but does nothing, so it can't leak into
+            // the application mid-conversion.
+            Keysym::DELETE | Keysym::BACKSPACE
+                if key.modifiers.control_key && !key.modifiers.alt_key =>
+            {
+                if self.selected_is_deletable() {
+                    self.delete_selected_candidate_from_history()
+                } else {
+                    EngineResult::consumed()
+                }
+            }
             Keysym::BACKSPACE => self.backspace_conversion(),
             _ => {
                 // Ctrl+N / Ctrl+P: emacs-style candidate navigation
@@ -1093,7 +1101,7 @@ impl InputMethodEngine {
     }
 
     fn record_conversion_learning(&mut self, selections: &[(String, String)]) {
-        if self.input_mode == InputMode::Emoji {
+        if self.mode.current() == InputMode::Emoji {
             return;
         }
         for (reading, text) in selections {
@@ -1137,10 +1145,9 @@ impl InputMethodEngine {
         self.input_buf.text.clear();
         self.live.text.clear();
         self.chunks.clear();
-        self.exit_emoji_mode();
+        self.mode.exit_temporary();
 
         EngineResult::consumed()
-            .with_action(EngineAction::UpdatePreedit(Preedit::new()))
             .with_action(EngineAction::HideCandidates)
             .with_action(EngineAction::HideAuxText)
             .with_action(EngineAction::Commit(text))
@@ -1158,7 +1165,7 @@ impl InputMethodEngine {
         self.input_buf.text.clear();
         self.live.text.clear();
         self.chunks.clear();
-        self.exit_emoji_mode();
+        self.mode.exit_temporary();
 
         self.advance_surrounding_context_after_commit(&text);
 
@@ -1171,6 +1178,79 @@ impl InputMethodEngine {
             .with_action(EngineAction::HideCandidates);
         result.actions.extend(new_input_result.actions);
         result
+    }
+
+    /// Whether the selected candidate can be removed from the learning
+    /// history. False when nothing is selected, so the delete chord stays
+    /// inert outside the case it is meant for.
+    fn selected_is_deletable(&self) -> bool {
+        self.state
+            .candidates()
+            .and_then(|c| c.selected())
+            .is_some_and(Candidate::is_deletable)
+    }
+
+    /// Delete the selected learning candidate from the history
+    /// (Ctrl+Backspace / Ctrl+Delete); the caller guards deletability
+    /// ([`Self::selected_is_deletable`]).
+    ///
+    /// Removes the entry and its prefix twins
+    /// ([`LearningCache::remove_suggestion`]), then rebuilds the conversion
+    /// rather than dropping the row in place: dedup hid any
+    /// model/dictionary/fallback copy of the same surface behind the learning
+    /// entry, and only a rebuild brings it back.
+    fn delete_selected_candidate_from_history(&mut self) -> EngineResult {
+        let (surface, reading) = match &self.state {
+            InputState::Conversion {
+                segments,
+                active_segment,
+                ..
+            } => {
+                let Some(segment) = segments.get(*active_segment) else {
+                    return EngineResult::consumed();
+                };
+                let Some(surface) = segment
+                    .candidates
+                    .selected()
+                    .map(|candidate| candidate.text.clone())
+                else {
+                    return EngineResult::consumed();
+                };
+                (surface, segment.reading.clone())
+            }
+            _ => return EngineResult::consumed(),
+        };
+        let removed = self
+            .learning
+            .as_mut()
+            .is_some_and(|cache| cache.remove_suggestion(&reading, &surface));
+        if !removed {
+            return EngineResult::consumed();
+        }
+        debug!("deleted learning entry: {} -> {}", reading, surface);
+
+        let candidate_list = self.candidate_list_for_conversion_segment(&reading, None, false);
+        let (preedit, candidates) = {
+            let InputState::Conversion {
+                preedit,
+                candidates,
+                segments,
+                active_segment,
+            } = &mut self.state
+            else {
+                return EngineResult::consumed();
+            };
+            let Some(segment) = segments.get_mut(*active_segment) else {
+                return EngineResult::consumed();
+            };
+            segment.candidates = candidate_list.clone();
+            *candidates = candidate_list;
+            let updated_preedit =
+                Self::build_conversion_preedit_from_segments(segments, *active_segment);
+            *preedit = updated_preedit.clone();
+            (updated_preedit, candidates.clone())
+        };
+        self.conversion_update_result(preedit, candidates, &reading)
     }
 
     /// Cancel conversion and return to hiragana
@@ -1392,10 +1472,9 @@ impl InputMethodEngine {
         self.input_buf.clear();
         self.live.text.clear();
         self.chunks.clear();
-        self.exit_emoji_mode();
+        self.mode.exit_temporary();
 
         EngineResult::consumed()
-            .with_action(EngineAction::UpdatePreedit(Preedit::new()))
             .with_action(EngineAction::HideCandidates)
             .with_action(EngineAction::HideAuxText)
             .with_action(EngineAction::Commit(selected_text))

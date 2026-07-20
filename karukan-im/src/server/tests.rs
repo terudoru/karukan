@@ -111,6 +111,7 @@ fn test_typing_and_commit() {
     let resp = press(&mut server, XKB_KEY_RETURN);
     let commits = actions_of(&resp, "commit");
     assert_eq!(commits.last().unwrap()["text"], "か");
+    assert!(actions_of(&resp, "update_preedit").is_empty());
 }
 
 #[test]
@@ -140,6 +141,7 @@ fn test_explicit_commit_method() {
     );
     let commits = actions_of(&resp, "commit");
     assert_eq!(commits.last().unwrap()["text"], "か");
+    assert!(actions_of(&resp, "update_preedit").is_empty());
 
     // Nothing left to commit afterwards
     let resp = request(
@@ -147,6 +149,10 @@ fn test_explicit_commit_method() {
         json!({"jsonrpc":"2.0","id":8,"method":"commit"}),
     );
     assert!(actions_of(&resp, "commit").is_empty());
+    assert_eq!(
+        actions_of(&resp, "update_preedit").last().unwrap()["text"],
+        ""
+    );
 }
 
 #[test]
@@ -168,6 +174,7 @@ fn test_select_candidate_commits_page_candidate() {
     assert_eq!(resp["result"]["consumed"], true);
     let commits = actions_of(&resp, "commit");
     assert_eq!(commits.last().unwrap()["text"], first_text);
+    assert!(actions_of(&resp, "update_preedit").is_empty());
     assert!(!actions_of(&resp, "hide_candidates").is_empty());
 
     let resp = request(

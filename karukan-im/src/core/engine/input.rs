@@ -5,12 +5,12 @@ use super::*;
 impl InputMethodEngine {
     /// Refresh the input state after editing the composing buffer.
     pub(super) fn refresh_input_state(&mut self) -> EngineResult {
-        if self.input_mode != InputMode::Emoji {
+        if self.mode.current() != InputMode::Emoji {
             let convert = !self.input_buf.text.is_empty()
-                && (self.input_mode != InputMode::Alphabet
+                && (self.mode.current() != InputMode::Alphabet
                     || karukan_engine::contains_kana(&self.input_buf.text));
             if convert {
-                if self.live.enabled && self.input_mode != InputMode::Katakana {
+                if self.live.enabled && self.mode.current() != InputMode::Katakana {
                     if let Some(converted) = self.chunked_auto_suggest() {
                         if converted == self.input_buf.text {
                             self.live.text.clear();
@@ -37,7 +37,7 @@ impl InputMethodEngine {
                 .with_action(EngineAction::UpdateAuxText(self.format_aux_composing()));
         }
 
-        debug_assert_eq!(self.input_mode, InputMode::Emoji);
+        debug_assert_eq!(self.mode.current(), InputMode::Emoji);
         // Emoji shortcode input is ASCII and entirely rule-based. Running the
         // kana-kanji model here only delays the picker and can trigger an
         // unnecessary first-use model download.
@@ -84,7 +84,7 @@ impl InputMethodEngine {
         // The full-width space gesture from Empty in any mode is
         // `Ctrl+Space` (above), which seeds a Composing session.
         if key.keysym == Keysym::SPACE && !key.modifiers.control_key && !key.modifiers.alt_key {
-            return if self.input_mode == InputMode::Hiragana {
+            return if self.mode.current() == InputMode::Hiragana {
                 EngineResult::consumed().with_action(EngineAction::Commit("\u{3000}".to_string()))
             } else {
                 EngineResult::not_consumed()
@@ -107,7 +107,7 @@ impl InputMethodEngine {
         if typed_colon
             && !key.modifiers.control_key
             && !key.modifiers.alt_key
-            && self.input_mode != InputMode::Alphabet
+            && self.mode.current() != InputMode::Alphabet
         {
             return self.start_emoji_mode();
         }
@@ -123,10 +123,13 @@ impl InputMethodEngine {
             let is_shift_alpha =
                 ch.is_ascii_uppercase() || (shift_active && ch.is_ascii_alphabetic());
 
-            if is_shift_alpha && self.input_mode != InputMode::Alphabet {
-                self.input_mode = InputMode::Alphabet;
+            if is_shift_alpha {
+                // Shift-alphabet is a temporary per-word mode, not a sticky
+                // toggle: ModeState remembers the mode to restore when this
+                // word is committed, so the next word returns to kana (#37).
+                self.mode.enter_temporary(InputMode::Alphabet);
             }
-            let ch = if self.input_mode == InputMode::Alphabet && is_shift_alpha {
+            let ch = if self.mode.current() == InputMode::Alphabet && is_shift_alpha {
                 ch.to_ascii_uppercase()
             } else {
                 ch
@@ -142,7 +145,7 @@ impl InputMethodEngine {
         self.converters.romaji.reset();
         self.input_buf.clear();
 
-        if self.input_mode == InputMode::Alphabet {
+        if self.mode.current() == InputMode::Alphabet {
             self.input_buf.insert(&ch.to_string());
         } else {
             let prev_output_len = 0;
@@ -215,7 +218,7 @@ impl InputMethodEngine {
             Keysym::ESCAPE => self.cancel_composing(),
             Keysym::BACKSPACE => self.backspace_composing(),
             Keysym::DELETE => self.delete_composing(),
-            Keysym::SPACE if self.input_mode == InputMode::Alphabet => self.input_char(' '),
+            Keysym::SPACE if self.mode.current() == InputMode::Alphabet => self.input_char(' '),
             // Tab triggers conversion that bypasses the learning cache, so users
             // can escape stale or unwanted learned entries (mozc binds Tab to a
             // different conversion path — PredictAndConvert — in the same spirit).
@@ -235,16 +238,20 @@ impl InputMethodEngine {
                     let is_shift_alpha =
                         ch.is_ascii_uppercase() || (shift_active && ch.is_ascii_alphabetic());
 
-                    if is_shift_alpha && self.input_mode != InputMode::Alphabet {
+                    if is_shift_alpha && self.mode.current() != InputMode::Alphabet {
                         // Bake katakana before switching so preedit doesn't revert
-                        if self.input_mode == InputMode::Katakana {
+                        if self.mode.current() == InputMode::Katakana {
                             self.bake_katakana();
                         }
-                        self.input_mode = InputMode::Alphabet;
+                        // Shift-alphabet is a temporary per-word mode:
+                        // ModeState remembers the mode to restore on
+                        // commit/cancel, so the next word returns to the
+                        // prior mode (issue #37).
+                        self.mode.enter_temporary(InputMode::Alphabet);
                         self.flush_romaji_to_composed();
                         self.live.text.clear();
                     }
-                    let ch = if self.input_mode == InputMode::Alphabet && is_shift_alpha {
+                    let ch = if self.mode.current() == InputMode::Alphabet && is_shift_alpha {
                         ch.to_ascii_uppercase()
                     } else {
                         ch
@@ -258,7 +265,7 @@ impl InputMethodEngine {
 
     /// Begin a new emoji-shortcode composing session.
     ///
-    /// Resets any leftover state, switches `input_mode` to
+    /// Resets any leftover state, switches the input mode to
     /// [`InputMode::Emoji`], seeds the buffer with `:`, and refreshes
     /// the candidate list so the user sees emoji suggestions appear
     /// the moment they press `:`.
@@ -268,12 +275,10 @@ impl InputMethodEngine {
         self.live.text.clear();
         // Remember where the user was so commit/cancel/erase-to-empty
         // can drop them back into the same mode (e.g. Katakana stays
-        // Katakana). Guard against clobbering on re-entry just in case
-        // start_emoji_mode is ever called while already in Emoji mode.
-        if self.input_mode != InputMode::Emoji {
-            self.pre_emoji_mode = Some(self.input_mode);
-        }
-        self.input_mode = InputMode::Emoji;
+        // Katakana). ModeState guards against clobbering the saved mode
+        // on re-entry just in case start_emoji_mode is ever called while
+        // already in Emoji mode.
+        self.mode.enter_temporary(InputMode::Emoji);
         self.input_buf.insert(":");
         self.refresh_input_state()
     }
@@ -293,7 +298,7 @@ impl InputMethodEngine {
     /// Input a character during composing.
     /// In alphabet mode, inserts directly; otherwise goes through romaji conversion.
     pub(super) fn input_char(&mut self, ch: char) -> EngineResult {
-        if matches!(self.input_mode, InputMode::Alphabet | InputMode::Emoji) {
+        if matches!(self.mode.current(), InputMode::Alphabet | InputMode::Emoji) {
             self.input_buf.insert(&ch.to_string());
             return self.refresh_input_state();
         }
@@ -335,14 +340,14 @@ impl InputMethodEngine {
         self.flush_romaji_to_composed();
 
         let reading = self.input_buf.text.clone();
-        let text = if self.input_mode == InputMode::Emoji {
+        let text = if self.mode.current() == InputMode::Emoji {
             // Emoji mode: Enter should select the first emoji candidate the
             // EmojiRewriter would surface, not commit the literal `:smile`.
             // Falls back to the literal buffer when nothing matches (e.g.
             // `:xyz`) so the user still sees what they typed.
             self.first_emoji_candidate(&reading)
                 .unwrap_or_else(|| reading.clone())
-        } else if self.input_mode == InputMode::Katakana {
+        } else if self.mode.current() == InputMode::Katakana {
             // Katakana mode always commits katakana, ignoring live conversion
             karukan_engine::hiragana_to_katakana(&reading)
         } else if !self.live.text.is_empty() {
@@ -366,7 +371,7 @@ impl InputMethodEngine {
         // Skip the learning record for emoji mode — the buffer holds
         // a Slack-style query like `:smile`, not a hiragana reading,
         // so storing it would corrupt the kana-keyed learning cache.
-        if self.input_mode != InputMode::Emoji {
+        if self.mode.current() != InputMode::Emoji {
             self.record_learning(&reading, &text);
         }
 
@@ -375,14 +380,16 @@ impl InputMethodEngine {
         self.live.text.clear();
         self.chunks.clear();
         self.state = InputState::Empty;
-        self.exit_emoji_mode();
+        // Temporary modes (Emoji, Alphabet) end with the composition:
+        // committing the word returns to the prior mode, so the next word
+        // is converted again (#37).
+        self.mode.exit_temporary();
 
         // HideCandidates is required here: the auto-suggest/live-conversion
         // window may be open while Composing, and the macOS frontend's
         // NSPanel only closes on an explicit hide (fcitx5 resets its panel
         // on commit implicitly, which masked this on Linux).
         EngineResult::consumed()
-            .with_action(EngineAction::UpdatePreedit(Preedit::new()))
             .with_action(EngineAction::Commit(text))
             .with_action(EngineAction::HideCandidates)
             .with_action(EngineAction::HideAuxText)
@@ -409,7 +416,7 @@ impl InputMethodEngine {
         // discard the typed characters which is surprising when the
         // user just wanted to dismiss the candidate list.
         let emoji_literal =
-            if self.input_mode == InputMode::Emoji && !self.input_buf.text.is_empty() {
+            if self.mode.current() == InputMode::Emoji && !self.input_buf.text.is_empty() {
                 Some(self.input_buf.text.clone())
             } else {
                 None
@@ -420,18 +427,22 @@ impl InputMethodEngine {
         self.live.text.clear();
         self.chunks.clear();
         self.state = InputState::Empty;
-        // Emoji mode is per-session: leaving it returns the user to
-        // whatever mode they were in before typing `:` so their next
-        // word doesn't unexpectedly stay in ASCII-passthrough mode.
-        self.exit_emoji_mode();
+        // Temporary modes (Emoji, Alphabet) are per-session: cancelling
+        // returns the user to whatever mode they were in before, so their
+        // next word doesn't unexpectedly stay in ASCII-passthrough mode
+        // (#37).
+        self.mode.exit_temporary();
 
-        let mut result = EngineResult::consumed()
-            .with_action(EngineAction::UpdatePreedit(Preedit::new()))
-            .with_action(EngineAction::HideCandidates)
-            .with_action(EngineAction::HideAuxText);
         if let Some(literal) = emoji_literal {
-            result = result.with_action(EngineAction::Commit(literal));
+            EngineResult::consumed()
+                .with_action(EngineAction::Commit(literal))
+                .with_action(EngineAction::HideCandidates)
+                .with_action(EngineAction::HideAuxText)
+        } else {
+            EngineResult::consumed()
+                .with_action(EngineAction::UpdatePreedit(Preedit::new()))
+                .with_action(EngineAction::HideCandidates)
+                .with_action(EngineAction::HideAuxText)
         }
-        result
     }
 }

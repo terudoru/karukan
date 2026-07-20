@@ -6,14 +6,15 @@ use super::*;
 
 impl InputMethodEngine {
     /// Enter katakana mode (Ctrl+k)
-    /// One-way switch to Katakana; use Right Super to return to Hiragana.
+    /// One-way switch to Katakana; a mode toggle key (Right Super, JIS 変換,
+    /// macOS かな/right-⌘ tap) returns to Hiragana.
     pub(super) fn enter_katakana_mode(&mut self) -> EngineResult {
         // Already in katakana mode: nothing to do
-        if self.input_mode == InputMode::Katakana {
+        if self.mode.current() == InputMode::Katakana {
             return EngineResult::consumed();
         }
 
-        self.input_mode = InputMode::Katakana;
+        self.mode.set(InputMode::Katakana);
         // Clear live conversion text so katakana mode takes priority on commit
         self.live.text.clear();
 
@@ -46,7 +47,7 @@ impl InputMethodEngine {
         let aux = EngineAction::UpdateAuxText(format!("ライブ変換: {}", mode));
 
         if matches!(self.state, InputState::Composing { .. })
-            && self.input_mode != InputMode::Katakana
+            && self.mode.current() != InputMode::Katakana
         {
             if self.live.enabled {
                 let mut result = self.refresh_input_state();

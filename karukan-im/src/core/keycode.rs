@@ -38,6 +38,12 @@ impl Keysym {
     pub const HYPER_L: Keysym = Keysym(0xffed);
     pub const HYPER_R: Keysym = Keysym(0xffee);
 
+    // Japanese keyboard keys (JIS layout)
+    /// 変換 key (XK_Henkan_Mode; XK_Henkan is a non-deprecated alias for the
+    /// same value). Delivered by fcitx5 for the key right of Space on JIS
+    /// keyboards.
+    pub const HENKAN: Keysym = Keysym(0xff23);
+
     // Space
     pub const SPACE: Keysym = Keysym(0x0020);
 
@@ -71,20 +77,6 @@ impl Keysym {
     pub const KEY_P: Keysym = Keysym(0x0070); // lowercase 'p'
     pub const KEY_P_UPPER: Keysym = Keysym(0x0050); // uppercase 'P'
 
-    // Function keys
-    pub const F1: Keysym = Keysym(0xffbe);
-    pub const F2: Keysym = Keysym(0xffbf);
-    pub const F3: Keysym = Keysym(0xffc0);
-    pub const F4: Keysym = Keysym(0xffc1);
-    pub const F5: Keysym = Keysym(0xffc2);
-    pub const F6: Keysym = Keysym(0xffc3);
-    pub const F7: Keysym = Keysym(0xffc4);
-    pub const F8: Keysym = Keysym(0xffc5);
-    pub const F9: Keysym = Keysym(0xffc6);
-    pub const F10: Keysym = Keysym(0xffc7);
-    pub const F11: Keysym = Keysym(0xffc8);
-    pub const F12: Keysym = Keysym(0xffc9);
-
     /// Check if this keysym represents a printable character
     pub fn is_printable(&self) -> bool {
         // ASCII printable range (0x20-0x7e)
@@ -108,23 +100,20 @@ impl Keysym {
         }
     }
 
-    /// Check if this is a shift key
-    pub fn is_shift(&self) -> bool {
-        matches!(*self, Self::SHIFT_L | Self::SHIFT_R)
-    }
-
-    /// Check if this is a control key
-    pub fn is_control(&self) -> bool {
-        matches!(*self, Self::CONTROL_L | Self::CONTROL_R)
-    }
-
-    /// Check if this is a right-side modifier key used for alphabet/hiragana mode toggle.
-    /// Different keyboards map the right CMD/Super key to different keysyms
-    /// (Alt_R, Super_R, Meta_R, Hyper_R), so we accept all of them.
+    /// Check if this key switches back to hiragana input mode.
+    ///
+    /// Two families of keys qualify:
+    /// * Right-side modifiers — different keyboards map the right CMD/Super
+    ///   key to different keysyms (Alt_R, Super_R, Meta_R, Hyper_R), so we
+    ///   accept all of them. The macOS frontend also synthesizes Super_R
+    ///   for the JIS かな key and the lone right-⌘ tap.
+    /// * The JIS 変換 key (Henkan) — the dedicated "give me Japanese" key on
+    ///   Japanese keyboards under Linux/fcitx5, so JIS users aren't forced
+    ///   onto the right-modifier gesture (issue #33).
     pub fn is_mode_toggle_key(&self) -> bool {
         matches!(
             *self,
-            Self::ALT_R | Self::SUPER_R | Self::META_R | Self::HYPER_R
+            Self::ALT_R | Self::SUPER_R | Self::META_R | Self::HYPER_R | Self::HENKAN
         )
     }
 
@@ -182,6 +171,11 @@ impl KeyModifiers {
     pub const CONTROL_MASK: u32 = 4; // ControlMask
     pub const ALT_MASK: u32 = 8; // Mod1Mask
     pub const SUPER_MASK: u32 = 64; // Mod4Mask
+
+    /// True when any modifier (Shift/Ctrl/Alt/Super) is held.
+    pub fn any(&self) -> bool {
+        self.shift_key || self.control_key || self.alt_key || self.super_key
+    }
 
     /// Decode a bitmask of XKB modifier flags into a `KeyModifiers` struct.
     pub fn from_modifier_state(state: u32) -> Self {

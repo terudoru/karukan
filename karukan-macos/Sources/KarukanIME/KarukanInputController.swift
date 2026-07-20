@@ -15,16 +15,41 @@ class KarukanInputController: IMKInputController {
     /// engine actions). Used to decide when to refresh surrounding text.
     private var hasPreedit = false
 
+    /// Detects the lone right-⌘ tap that returns to hiragana mode on
+    /// keyboards without a JIS かな key (issue #33).
+    private var rightCommandTap = RightCommandTapDetector()
+
     // MARK: - Event handling
 
     override func recognizedEvents(_ sender: Any!) -> Int {
-        Int(NSEvent.EventTypeMask.keyDown.rawValue)
+        // flagsChanged is needed for the right-⌘ tap detection; plain
+        // keyDown events never carry lone-modifier transitions.
+        Int(NSEvent.EventTypeMask([.keyDown, .flagsChanged]).rawValue)
     }
 
     override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
         guard let event else { return false }
+
+        // Lone right-⌘ tap → hiragana, the US-layout stand-in for the JIS
+        // かな key. Never consume flagsChanged: the system must keep an
+        // accurate view of modifier state.
+        if event.type == .flagsChanged {
+            let fired = rightCommandTap.handleFlagsChanged(
+                keyCode: event.keyCode,
+                flags: event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            )
+            if fired, let client = sender as? (any IMKTextInput) {
+                sendKanaToggle(client: client)
+            }
+            return false
+        }
+
         guard event.type == .keyDown else { return false }
         guard let client = sender as? (any IMKTextInput) else { return false }
+
+        // A real key press means any held right ⌘ is a shortcut modifier,
+        // not a pending tap.
+        rightCommandTap.cancel()
 
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         // Never swallow Command shortcuts.
@@ -34,10 +59,7 @@ class KarukanInputController: IMKInputController {
         // consume so the system doesn't process keyCode 104 after the engine
         // returns not_consumed (already in hiragana mode).
         if event.keyCode == KeyCodeMap.kanaKeyCode {
-            let key = EngineKeyEvent(keysym: KeyCodeMap.superRKeysym, modifiers: KeyModifiers())
-            if let result = engineClient.processKeySync(key) {
-                apply(actions: result.actions, client: client)
-            }
+            sendKanaToggle(client: client)
             return true
         }
 
@@ -70,9 +92,21 @@ class KarukanInputController: IMKInputController {
         return result.consumed
     }
 
+    /// Send the return-to-hiragana toggle (Super_R) to the engine and apply
+    /// the resulting actions.
+    private func sendKanaToggle(client: any IMKTextInput) {
+        let key = EngineKeyEvent(keysym: KeyCodeMap.superRKeysym, modifiers: KeyModifiers())
+        if let result = engineClient.processKeySync(key) {
+            apply(actions: result.actions, client: client)
+        }
+    }
+
     // MARK: - Lifecycle
 
     override func deactivateServer(_ sender: Any!) {
+        // A right-⌘ press armed before a focus switch must not fire after
+        // it (e.g. right-⌘-clicking another window).
+        rightCommandTap.cancel()
         // Mozc-style: commit the pending preedit on focus loss, then
         // persist what the user taught us.
         if let client = sender as? (any IMKTextInput) {
@@ -130,6 +164,11 @@ class KarukanInputController: IMKInputController {
         for action in actions {
             switch action {
             case .commit(let text):
+                // insertText replaces the marked text and ends the
+                // composition; since #46 the engine no longer pairs Commit
+                // with an empty UpdatePreedit, so clear the flag here or the
+                // next keystroke would skip the surrounding-text refresh.
+                hasPreedit = false
                 client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
 
             case .updatePreedit(let text, let caret, let attributes):

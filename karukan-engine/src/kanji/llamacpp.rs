@@ -86,21 +86,7 @@ impl LlamaCppModel {
     ///
     /// GPT-2 models use CPU only (Metal has issues with GPT-2).
     pub fn from_file<P: AsRef<Path>, T: AsRef<Path>>(path: P, tokenizer_json: T) -> Result<Self> {
-        let backend = get_backend()?;
-
-        // GPT-2 has Metal issues, use CPU
-        let model_params = Self::cpu_model_params()?;
-
-        let model = LlamaModel::load_from_file(backend, path.as_ref(), &model_params)
-            .map_err(|e| KanjiError::ModelLoad(e.into()))?;
-        let external_tokenizer = load_tokenizer(tokenizer_json)?;
-
-        Ok(Self {
-            model,
-            n_ctx: 256,
-            external_tokenizer,
-            n_threads: 0,
-        })
+        Self::from_file_with_n_ctx(path, tokenizer_json, 256)
     }
 
     /// Load a GGUF model with a pre-tokenizer type override.
@@ -136,14 +122,7 @@ impl LlamaCppModel {
 
         let model = LlamaModel::load_from_file(backend, path.as_ref(), &params)
             .map_err(|e| KanjiError::ModelLoad(e.into()))?;
-        let external_tokenizer = load_tokenizer(tokenizer_json)?;
-
-        Ok(Self {
-            model,
-            n_ctx: 256,
-            external_tokenizer,
-            n_threads: 0,
-        })
+        Self::finish(model, tokenizer_json, 256)
     }
 
     /// Load a GGUF model with explicit context window size
@@ -158,6 +137,11 @@ impl LlamaCppModel {
 
         let model = LlamaModel::load_from_file(backend, path.as_ref(), &model_params)
             .map_err(|e| KanjiError::ModelLoad(e.into()))?;
+        Self::finish(model, tokenizer_json, n_ctx)
+    }
+
+    /// Load the external tokenizer and construct the model wrapper.
+    fn finish<T: AsRef<Path>>(model: LlamaModel, tokenizer_json: T, n_ctx: u32) -> Result<Self> {
         let external_tokenizer = load_tokenizer(tokenizer_json)?;
 
         Ok(Self {
@@ -575,6 +559,18 @@ impl LlamaCppModel {
         Ok(all_results)
     }
 
+    /// Add input tokens to a batch as a single sequence, requesting logits
+    /// only for the last token.
+    fn add_input_tokens(&self, batch: &mut LlamaBatch, tokens: &[LlamaToken]) -> Result<()> {
+        for (i, token) in tokens.iter().enumerate() {
+            let is_last = i == tokens.len() - 1;
+            batch
+                .add(*token, i as i32, &[0], is_last)
+                .map_err(|e| KanjiError::Inference(e.into()))?;
+        }
+        Ok(())
+    }
+
     /// Process a token sequence and return the logits at the last position.
     ///
     /// Creates a fresh context for each call. Used by true beam search where
@@ -589,12 +585,7 @@ impl LlamaCppModel {
             .map_err(|e| KanjiError::Inference(e.into()))?;
 
         let mut batch = LlamaBatch::new(512, 1);
-        for (i, token) in tokens.iter().enumerate() {
-            let is_last = i == tokens.len() - 1;
-            batch
-                .add(*token, i as i32, &[0], is_last)
-                .map_err(|e| KanjiError::Inference(e.into()))?;
-        }
+        self.add_input_tokens(&mut batch, tokens)?;
         ctx.decode(&mut batch)
             .map_err(|e| KanjiError::Inference(e.into()))?;
 
@@ -663,12 +654,7 @@ impl LlamaCppModel {
         let mut generated = input_tokens.to_vec();
 
         // Process input tokens
-        for (i, token) in input_tokens.iter().enumerate() {
-            let is_last = i == input_tokens.len() - 1;
-            batch
-                .add(*token, i as i32, &[0], is_last)
-                .map_err(|e| KanjiError::Inference(e.into()))?;
-        }
+        self.add_input_tokens(&mut batch, input_tokens)?;
 
         ctx.decode(&mut batch)
             .map_err(|e| KanjiError::Inference(e.into()))?;
@@ -680,18 +666,8 @@ impl LlamaCppModel {
         for n_cur in (input_tokens.len()..).take(max_new_tokens) {
             let new_token = sampler.sample(&ctx, -1);
 
-            // Check for EOS using the provided token ID
-            if eos_token_id.is_some_and(|eos| new_token.0 == eos) {
-                break;
-            }
-
-            // Check against model's EOS token
-            if new_token == model_eos {
-                break;
-            }
-
-            // Check if model thinks it's end of generation
-            if self.model.is_eog_token(new_token) {
+            // Check for EOS
+            if self.is_eos_token(new_token, eos_token_id, model_eos) {
                 break;
             }
 

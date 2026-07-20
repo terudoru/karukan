@@ -65,7 +65,7 @@ fn space_in_empty_hiragana_commits_fullwidth_space() {
     // convention, but without the side effect of "second Space starts
     // Conversion mode" that a Composing-state insertion would cause.
     let mut engine = InputMethodEngine::new();
-    assert_eq!(engine.input_mode, InputMode::Hiragana);
+    assert_eq!(engine.mode.current(), InputMode::Hiragana);
 
     let result = engine.process_key(&press_key(Keysym::SPACE));
     assert!(result.consumed);
@@ -99,7 +99,7 @@ fn space_in_empty_katakana_passes_through() {
     // Non-Hiragana modes pass the bare Space through to the OS so the
     // application gets a normal half-width ASCII space.
     let mut engine = InputMethodEngine::new();
-    engine.input_mode = InputMode::Katakana;
+    engine.mode.set(InputMode::Katakana);
 
     let result = engine.process_key(&press_key(Keysym::SPACE));
     assert!(!result.consumed);
@@ -114,7 +114,7 @@ fn space_in_empty_katakana_passes_through() {
 #[test]
 fn space_in_empty_alphabet_passes_through() {
     let mut engine = InputMethodEngine::new();
-    engine.input_mode = InputMode::Alphabet;
+    engine.mode.enter_temporary(InputMode::Alphabet);
 
     let result = engine.process_key(&press_key(Keysym::SPACE));
     assert!(!result.consumed);

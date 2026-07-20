@@ -39,6 +39,7 @@ data/
 !karukan-engine/data/
 *.json
 !dictionary/manifest.json
+!renovate.json
 *.cache
 
 .fake
