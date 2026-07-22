@@ -14,6 +14,45 @@ func userFacingCandidateAux(_ text: String?) -> String? {
     return learningDeleteHint
 }
 
+struct CandidateScrollResult: Equatable {
+    let step: Int
+    let remainder: CGFloat
+}
+
+/// Convert high-resolution trackpad deltas and discrete mouse-wheel ticks to
+/// one candidate step at a time without making tiny trackpad noise jump rows.
+func candidateScrollResult(accumulated: CGFloat, delta: CGFloat, precise: Bool)
+    -> CandidateScrollResult
+{
+    let total = accumulated + delta
+    let threshold: CGFloat = precise ? 8 : 1
+    guard abs(total) >= threshold else {
+        return CandidateScrollResult(step: 0, remainder: total)
+    }
+    // AppKit reports positive deltaY when scrolling upward.
+    return CandidateScrollResult(step: total > 0 ? -1 : 1, remainder: 0)
+}
+
+final class CandidateBackgroundView: NSVisualEffectView {
+    var onCandidateStep: ((Int) -> Void)?
+    private var accumulatedScroll: CGFloat = 0
+
+    override func scrollWheel(with event: NSEvent) {
+        let result = candidateScrollResult(
+            accumulated: accumulatedScroll,
+            delta: event.scrollingDeltaY,
+            precise: event.hasPreciseScrollingDeltas
+        )
+        accumulatedScroll = result.remainder
+        if result.step != 0 {
+            onCandidateStep?(result.step)
+        }
+        if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
+            accumulatedScroll = 0
+        }
+    }
+}
+
 /// A candidate row receives mouse events without activating the floating
 /// panel, preserving keyboard focus in the client application.
 final class CandidateRowView: NSView {
@@ -67,6 +106,11 @@ final class CandidateRowView: NSView {
         else { return }
         onDoubleClick?(index)
     }
+
+    override func accessibilityPerformPress() -> Bool {
+        onDoubleClick?(pageIndex)
+        return true
+    }
 }
 
 /// Place a candidate panel on the display containing the composition cursor,
@@ -116,10 +160,13 @@ class CandidateWindowController {
 
     private let panel: NSPanel
     private let stackView: NSStackView
-    private let panelBackgroundView: NSVisualEffectView
+    private let panelBackgroundView: CandidateBackgroundView
     private var rowViews: [NSView] = []
     private var auxText: String?
     var onCandidateDoubleClick: ((Int) -> Void)?
+    var onCandidateStep: ((Int) -> Void)? {
+        didSet { panelBackgroundView.onCandidateStep = onCandidateStep }
+    }
 
     private struct PageState {
         let candidates: [CandidateItem]
@@ -146,7 +193,7 @@ class CandidateWindowController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         panel.setAccessibilityTitle("変換候補")
 
-        panelBackgroundView = NSVisualEffectView()
+        panelBackgroundView = CandidateBackgroundView()
         panelBackgroundView.translatesAutoresizingMaskIntoConstraints = false
         panelBackgroundView.material = .popover
         panelBackgroundView.blendingMode = .behindWindow
@@ -166,6 +213,9 @@ class CandidateWindowController {
             right: Self.stackHorizontalInset
         )
         stackView.translatesAutoresizingMaskIntoConstraints = false
+        stackView.setAccessibilityElement(true)
+        stackView.setAccessibilityRole(.list)
+        stackView.setAccessibilityLabel("変換候補")
 
         panelBackgroundView.addSubview(stackView)
         panel.contentView?.addSubview(panelBackgroundView)

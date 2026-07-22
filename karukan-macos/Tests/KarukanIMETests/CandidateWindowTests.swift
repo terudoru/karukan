@@ -4,6 +4,18 @@ import XCTest
 @testable import KarukanIME
 
 final class CandidateWindowTests: XCTestCase {
+    func testCandidateScrollAccumulatesTrackpadDeltasAndMapsDirection() {
+        let partial = candidateScrollResult(accumulated: 0, delta: -3, precise: true)
+        XCTAssertEqual(partial, CandidateScrollResult(step: 0, remainder: -3))
+
+        let next = candidateScrollResult(
+            accumulated: partial.remainder, delta: -5, precise: true)
+        XCTAssertEqual(next, CandidateScrollResult(step: 1, remainder: 0))
+
+        let previous = candidateScrollResult(accumulated: 0, delta: 1, precise: false)
+        XCTAssertEqual(previous, CandidateScrollResult(step: -1, remainder: 0))
+    }
+
     func testCandidateRowTracksSelectionWithoutAStoredColor() {
         let row = CandidateRowView(pageIndex: 0)
         row.isSelected = true
@@ -34,6 +46,10 @@ final class CandidateWindowTests: XCTestCase {
         row.handleClick(count: 1)
         XCTAssertNil(selectedIndex)
         row.handleClick(count: 2)
+        XCTAssertEqual(selectedIndex, 3)
+
+        selectedIndex = nil
+        XCTAssertTrue(row.accessibilityPerformPress())
         XCTAssertEqual(selectedIndex, 3)
     }
 

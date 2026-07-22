@@ -2,6 +2,7 @@ use serde_json::{Value, json};
 
 use super::ImServer;
 use crate::config::Settings;
+use crate::config::settings::StrategyMode;
 use crate::core::keycode::Keysym;
 
 // XKB keysyms for common keys (u32 aliases for the JSON payloads below)
@@ -275,4 +276,34 @@ fn test_status_before_init() {
     );
     assert_eq!(resp["result"]["initialized"], false);
     assert_eq!(resp["result"]["state"], "empty");
+}
+
+#[test]
+fn init_returns_before_resources_and_first_kana_input_stays_responsive() {
+    let mut settings = Settings::default();
+    settings.conversion.strategy = StrategyMode::Main;
+    settings.conversion.model = Some("not-a-real-model".to_string());
+    settings.conversion.live_conversion = false;
+    settings.learning.enabled = false;
+    settings.dictionary_update.enabled = false;
+    let mut server = ImServer::with_settings(settings);
+
+    let started = std::time::Instant::now();
+    let init = request(
+        &mut server,
+        json!({"jsonrpc":"2.0","id":40,"method":"init","params":{}}),
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(250),
+        "init must only start the worker, not wait for resources"
+    );
+    assert_eq!(init["result"]["model_name"], "initializing");
+
+    press(&mut server, XKB_KEY_K);
+    let typed = press(&mut server, XKB_KEY_A);
+    assert_eq!(
+        actions_of(&typed, "update_preedit").last().unwrap()["text"],
+        "か"
+    );
+    assert_eq!(typed["result"]["process_key_ms"], 0);
 }
