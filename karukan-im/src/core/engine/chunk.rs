@@ -12,6 +12,10 @@ use tracing::debug;
 
 use super::*;
 
+/// Keep a deferred macOS inference short enough that a key queued behind it
+/// still returns within roughly one display frame on the supported models.
+const DEFERRED_LIVE_CHUNK_LEN: usize = 12;
+
 /// Number of leading chars shared by `a` and `b`.
 fn common_prefix_len(a: &[char], b: &[char]) -> usize {
     a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
@@ -253,7 +257,11 @@ impl InputMethodEngine {
 
         self.ensure_kanji_converter();
 
-        let chunk_len = self.chunk_len();
+        let chunk_len = if max_neural_chunks.is_some() {
+            self.deferred_chunk_len()
+        } else {
+            self.chunk_len()
+        };
         let text: Vec<char> = full_reading.chars().collect();
         let base_ctx = self.truncate_context_for_api();
 
@@ -336,6 +344,10 @@ impl InputMethodEngine {
     /// Configured maximum chunk length in chars, clamped to at least 1.
     pub(super) fn chunk_len(&self) -> usize {
         self.config.composing_chunk_len.max(1)
+    }
+
+    pub(super) fn deferred_chunk_len(&self) -> usize {
+        self.chunk_len().min(DEFERRED_LIVE_CHUNK_LEN)
     }
 
     /// The left context (lctx) a chunk is built with: the editor surrounding

@@ -124,6 +124,16 @@ fn test_short_buffer_is_a_single_chunk() {
 }
 
 #[test]
+fn deferred_chunk_length_is_bounded_for_key_responsiveness() {
+    let engine = make_chunk_engine(30);
+    assert_eq!(engine.chunk_len(), 30);
+    assert_eq!(engine.deferred_chunk_len(), 12);
+
+    let engine = make_chunk_engine(8);
+    assert_eq!(engine.deferred_chunk_len(), 8);
+}
+
+#[test]
 fn test_last_chunk_may_be_shorter_than_n() {
     let mut engine = make_chunk_engine(2);
     engine.process_key(&press('a'));
