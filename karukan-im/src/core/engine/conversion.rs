@@ -20,11 +20,117 @@ const MAX_LEARNING_PREFIX_SURFACE_CHARS: usize = 24;
 /// choose a useful clause even when live-conversion chunking uses a larger
 /// latency-oriented chunk size.
 const MAX_EXPLICIT_SEGMENT_CHARS: usize = 8;
+/// Bound the dynamic-programming matrix for unusually long preedits. Normal
+/// live-conversion chunks are at most 40 characters (about 1,600 cells).
+const MAX_SURFACE_ALIGNMENT_CELLS: usize = 16_384;
 const SEGMENT_DISPLAY_SEPARATOR: &str = "\u{200B}";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ReadingSpan {
     pub reading: String,
     pub fixed_surface: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct SurfaceAlignment {
+    unmatched_reading_chars: usize,
+    user_reading_chars: usize,
+    dictionary_score: f32,
+    spans: Vec<ReadingSpan>,
+}
+
+impl SurfaceAlignment {
+    fn is_better_than(&self, other: &Self) -> bool {
+        // A displayed user-dictionary surface remains a hard anchor. Among
+        // paths with equal user coverage, prefer dictionary-backed coverage,
+        // then the lower dictionary cost and finally fewer segments.
+        self.user_reading_chars > other.user_reading_chars
+            || (self.user_reading_chars == other.user_reading_chars
+                && (self.unmatched_reading_chars < other.unmatched_reading_chars
+                    || (self.unmatched_reading_chars == other.unmatched_reading_chars
+                        && (self
+                            .dictionary_score
+                            .total_cmp(&other.dictionary_score)
+                            .is_lt()
+                            || (self
+                                .dictionary_score
+                                .total_cmp(&other.dictionary_score)
+                                .is_eq()
+                                && self.spans.len() < other.spans.len())))))
+    }
+
+    fn push_literal(&mut self, ch: char) {
+        self.unmatched_reading_chars += 1;
+        if let Some(last) = self.spans.last_mut()
+            && last.fixed_surface.is_none()
+        {
+            last.reading.push(ch);
+            return;
+        }
+        self.spans.push(ReadingSpan {
+            reading: ch.to_string(),
+            fixed_surface: None,
+        });
+    }
+
+    fn push_dictionary_match(&mut self, reading: &str, surface: &str, score: f32, is_user: bool) {
+        let reading_len = reading.chars().count();
+        if is_user {
+            self.user_reading_chars += reading_len;
+        }
+        self.dictionary_score += score;
+        self.spans.push(ReadingSpan {
+            reading: reading.to_string(),
+            fixed_surface: Some(surface.to_string()),
+        });
+    }
+}
+
+fn keep_better_alignment(slot: &mut Option<SurfaceAlignment>, candidate: SurfaceAlignment) {
+    if slot
+        .as_ref()
+        .is_none_or(|existing| candidate.is_better_than(existing))
+    {
+        *slot = Some(candidate);
+    }
+}
+
+struct AlignmentPosition<'a> {
+    reading_suffix: &'a str,
+    reading_index: usize,
+    surface_index: usize,
+    surface_chars: &'a [char],
+}
+
+fn extend_dictionary_alignments(
+    paths: &mut [Vec<Option<SurfaceAlignment>>],
+    path: &SurfaceAlignment,
+    dictionary: &karukan_engine::Dictionary,
+    position: &AlignmentPosition<'_>,
+    max_reading_len: usize,
+    is_user: bool,
+) {
+    for entry in dictionary.common_prefix_search(position.reading_suffix) {
+        let reading_len = entry.reading.chars().count();
+        if reading_len == 0 || reading_len > max_reading_len {
+            continue;
+        }
+        for candidate in entry.candidates {
+            let candidate_chars: Vec<char> = candidate.surface.chars().collect();
+            if candidate_chars.is_empty()
+                || !position.surface_chars[position.surface_index..].starts_with(&candidate_chars)
+            {
+                continue;
+            }
+
+            let mut next = path.clone();
+            next.push_dictionary_match(entry.reading, &candidate.surface, candidate.score, is_user);
+            keep_better_alignment(
+                &mut paths[position.reading_index + reading_len]
+                    [position.surface_index + candidate_chars.len()],
+                next,
+            );
+        }
+    }
 }
 
 /// Mozc-style width/script annotation for a pure-kana candidate, or `None`
@@ -584,6 +690,96 @@ impl InputMethodEngine {
         spans
     }
 
+    /// Align a converted surface back to dictionary readings before entering
+    /// per-segment navigation. This avoids treating a merely longer prefix as
+    /// a word (`きょうはい...` → `きょうはい`) and avoids proportional
+    /// surface splits that attach `は` to `今日`.
+    fn split_navigation_spans_aligned_to_surface(
+        &self,
+        reading: &str,
+        surface: &str,
+    ) -> Option<Vec<ReadingSpan>> {
+        let reading_chars: Vec<char> = reading.chars().collect();
+        let surface_chars: Vec<char> = surface.chars().collect();
+        if reading_chars.is_empty() || surface_chars.is_empty() {
+            return None;
+        }
+        if (reading_chars.len() + 1)
+            .checked_mul(surface_chars.len() + 1)
+            .is_none_or(|cells| cells > MAX_SURFACE_ALIGNMENT_CELLS)
+        {
+            return None;
+        }
+
+        let mut paths = vec![vec![None; surface_chars.len() + 1]; reading_chars.len() + 1];
+        paths[0][0] = Some(SurfaceAlignment::default());
+        let max_system_reading_len = self.chunk_len().clamp(1, MAX_EXPLICIT_SEGMENT_CHARS);
+
+        for reading_index in 0..=reading_chars.len() {
+            for surface_index in 0..=surface_chars.len() {
+                let Some(path) = paths[reading_index][surface_index].clone() else {
+                    continue;
+                };
+                if reading_index == reading_chars.len() || surface_index == surface_chars.len() {
+                    continue;
+                }
+
+                let reading_suffix: String = reading_chars[reading_index..].iter().collect();
+                let position = AlignmentPosition {
+                    reading_suffix: &reading_suffix,
+                    reading_index,
+                    surface_index,
+                    surface_chars: &surface_chars,
+                };
+                if let Some(dictionary) = self.dicts.user.as_ref() {
+                    extend_dictionary_alignments(
+                        &mut paths,
+                        &path,
+                        dictionary,
+                        &position,
+                        reading_chars.len() - reading_index,
+                        true,
+                    );
+                }
+                if let Some(dictionary) = self.dicts.system.as_ref() {
+                    extend_dictionary_alignments(
+                        &mut paths,
+                        &path,
+                        dictionary,
+                        &position,
+                        max_system_reading_len,
+                        false,
+                    );
+                }
+
+                // Kana, punctuation, and other unchanged characters bridge
+                // gaps between dictionary-backed spans. Consecutive literal
+                // characters are kept as one segment.
+                if reading_chars[reading_index] == surface_chars[surface_index] {
+                    let mut next = path;
+                    next.push_literal(reading_chars[reading_index]);
+                    keep_better_alignment(&mut paths[reading_index + 1][surface_index + 1], next);
+                }
+            }
+        }
+
+        paths[reading_chars.len()][surface_chars.len()]
+            .take()
+            .map(|alignment| {
+                alignment
+                    .spans
+                    .into_iter()
+                    .flat_map(|span| {
+                        if span.fixed_surface.is_some() {
+                            vec![span]
+                        } else {
+                            self.split_free_reading_segments(&span.reading)
+                        }
+                    })
+                    .collect()
+            })
+    }
+
     fn split_reading_spans_preserving_user_dict(
         &self,
         reading: &str,
@@ -703,7 +899,12 @@ impl InputMethodEngine {
         reading: &str,
         current_surface: &str,
     ) -> Vec<ConversionSegment> {
-        let mut spans = self.split_reading_spans_preserving_user_dict(reading, true);
+        let aligned_spans = (!current_surface.is_empty() && current_surface != reading)
+            .then(|| self.split_navigation_spans_aligned_to_surface(reading, current_surface))
+            .flatten()
+            .filter(|spans| spans.len() > 1);
+        let mut spans = aligned_spans
+            .unwrap_or_else(|| self.split_reading_spans_preserving_user_dict(reading, true));
         if !current_surface.is_empty() && current_surface != reading {
             spans = coalesce_spans_to_surface_len(spans, current_surface);
         }

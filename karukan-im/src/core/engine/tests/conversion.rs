@@ -8,12 +8,21 @@ fn user_dict_with(reading: &str, surface: &str) -> Dictionary {
 }
 
 fn user_dict_with_entries(entries: &[(&str, &str)]) -> Dictionary {
+    dict_with_scored_entries(
+        &entries
+            .iter()
+            .map(|(reading, surface)| (*reading, *surface, 1.0))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn dict_with_scored_entries(entries: &[(&str, &str, f32)]) -> Dictionary {
     let mut tmp = tempfile::NamedTempFile::new().unwrap();
     let entries = entries
         .iter()
-        .map(|(reading, surface)| {
+        .map(|(reading, surface, score)| {
             format!(
-                r#"{{"reading":"{reading}","candidates":[{{"surface":"{surface}","score":1.0}}]}}"#
+                r#"{{"reading":"{reading}","candidates":[{{"surface":"{surface}","score":{score}}}]}}"#
             )
         })
         .collect::<Vec<_>>()
@@ -244,7 +253,59 @@ fn test_explicit_conversion_splits_short_sentence_at_particles() {
             .filter(|a| a.attr_type == AttributeType::Highlight)
             .map(|a| (a.start, a.end))
             .collect::<Vec<_>>(),
-        vec![(4, 5)]
+        vec![(3, 4)],
+        "the particle highlight must start after 今日, not after a proportional surface split"
+    );
+}
+
+#[test]
+fn test_segment_navigation_aligns_word_boundaries_to_converted_surface() {
+    let mut engine = InputMethodEngine::new();
+    engine.dicts.system = Some(dict_with_scored_entries(&[
+        ("きょう", "今日", 10.0),
+        // These longer prefixes are valid standalone dictionary entries but
+        // do not describe the displayed sentence.
+        ("きょうは", "教派", 1.0),
+        ("きょうはい", "向背", 1.0),
+        ("は", "は", 10.0),
+        ("はい", "はい", 20.0),
+        ("いい", "いい", 10.0),
+        ("てんき", "天気", 10.0),
+    ]));
+    engine.input_buf.insert("きょうはいいてんき");
+    engine.live.text = "今日はいい天気".to_string();
+
+    engine.start_conversion(false);
+    engine.process_key(&press_key(Keysym::RIGHT));
+
+    let InputState::Conversion {
+        segments,
+        active_segment,
+        ..
+    } = engine.state()
+    else {
+        panic!("expected conversion state");
+    };
+    assert_eq!(*active_segment, 1);
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| segment.reading.as_str())
+            .collect::<Vec<_>>(),
+        vec!["きょう", "は", "いい", "てんき"]
+    );
+    assert_eq!(visible_preedit_text(&engine), "今日はいい天気");
+    assert_eq!(
+        engine
+            .preedit()
+            .unwrap()
+            .attributes()
+            .iter()
+            .filter(|attribute| attribute.attr_type == AttributeType::Highlight)
+            .map(|attribute| (attribute.start, attribute.end))
+            .collect::<Vec<_>>(),
+        vec![(3, 4)],
+        "the active particle must highlight only は"
     );
 }
 
