@@ -27,10 +27,6 @@ func shouldScheduleDeferredLiveRefresh(
     return hasComposingPreedit && isComposingUpdate
 }
 
-func shouldPresentDeferredLiveResult(isInitial: Bool, needsMore: Bool) -> Bool {
-    isInitial || !needsMore
-}
-
 func shouldDeferSurroundingTextRefresh(hasPreedit: Bool, key: EngineKeyEvent) -> Bool {
     guard !hasPreedit else { return false }
     // ASCII/Latin-1 keysyms and XKB Unicode keysyms can begin marked text.
@@ -282,14 +278,14 @@ class KarukanInputController: IMKInputController {
         let generation = liveRefreshGeneration
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.liveRefreshGeneration == generation else { return }
-            self.requestLiveRefresh(generation: generation, presentsResult: true)
+            self.requestLiveRefresh(generation: generation)
         }
         pendingLiveRefresh = work
         DispatchQueue.main.asyncAfter(
             deadline: .now() + .milliseconds(liveRefreshDebounceMilliseconds), execute: work)
     }
 
-    private func requestLiveRefresh(generation: Int, presentsResult: Bool) {
+    private func requestLiveRefresh(generation: Int) {
         engineClient.refreshLiveConversionAsync { [weak self] result in
             DispatchQueue.main.async {
                 guard let self,
@@ -297,25 +293,18 @@ class KarukanInputController: IMKInputController {
                     let result,
                     let client = self.activeClientObject as? (any IMKTextInput)
                 else { return }
-                // Show the first bounded result promptly, then coalesce rapid
-                // middle-chunk changes into one final marked-text update.
-                // Each clause changes at most twice instead of flashing at the
-                // 50 ms continuation cadence.
-                if shouldPresentDeferredLiveResult(
-                    isInitial: presentsResult,
-                    needsMore: result.needsLiveRefresh == true
-                ) {
-                    self.apply(actions: result.actions, client: client)
-                }
+                // Keep the visible marked text identical to the engine state:
+                // Return may arrive between any two bounded refreshes.
+                self.apply(actions: result.actions, client: client)
                 guard result.needsLiveRefresh == true else { return }
                 let continuation = DispatchWorkItem { [weak self] in
                     guard let self, self.liveRefreshGeneration == generation else { return }
-                    self.requestLiveRefresh(generation: generation, presentsResult: false)
+                    self.requestLiveRefresh(generation: generation)
                 }
                 self.pendingLiveRefresh = continuation
-                // Yield between chunks so newly typed keys enter the server
-                // before the next model call.
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(50), execute: continuation)
+                // Yield long enough for newly typed keys to enter the server
+                // and for each one-way clause update to remain visually calm.
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(150), execute: continuation)
             }
         }
     }

@@ -215,12 +215,6 @@ final class DeferredLiveRefreshTests: XCTestCase {
         XCTAssertTrue(shouldScheduleDeferredLiveRefresh(after: composingActions, key: key))
     }
 
-    func testLongRefreshPresentsOnlyInitialAndFinalResults() {
-        XCTAssertTrue(shouldPresentDeferredLiveResult(isInitial: true, needsMore: true))
-        XCTAssertFalse(shouldPresentDeferredLiveResult(isInitial: false, needsMore: true))
-        XCTAssertTrue(shouldPresentDeferredLiveResult(isInitial: false, needsMore: false))
-    }
-
     func testBackspaceSchedulesRefreshButEscapeDoesNot() {
         XCTAssertTrue(
             shouldScheduleDeferredLiveRefresh(
