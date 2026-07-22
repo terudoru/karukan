@@ -320,7 +320,8 @@ fn test_segment_navigation_preserves_user_dictionary_span_without_duplication() 
     // Supply the surface that was already displayed by live conversion. This
     // isolates span preservation from the real model's whole-reading guess.
     engine.live.text = "愛うえ".to_string();
-    engine.start_segment_navigation(1);
+    engine.start_conversion(false);
+    engine.process_key(&press_key(Keysym::RIGHT));
 
     let InputState::Conversion {
         segments,
@@ -390,7 +391,8 @@ fn test_segment_navigation_preserves_existing_prediction_surface() {
     engine.input_buf.insert("きょうはいいてんき");
     engine.live.text = "今日はいい天気".to_string();
 
-    engine.start_segment_navigation(1);
+    engine.start_conversion(false);
+    engine.process_key(&press_key(Keysym::RIGHT));
 
     let InputState::Conversion {
         segments,

@@ -34,6 +34,60 @@ pub extern "C" fn karukan_engine_get_preedit_caret(engine: *const KarukanEngine)
     engine.preedit.caret_bytes as c_uint
 }
 
+/// Get the number of formatting ranges in the current preedit.
+#[unsafe(no_mangle)]
+pub extern "C" fn karukan_engine_get_preedit_attribute_count(
+    engine: *const KarukanEngine,
+) -> c_uint {
+    let engine = ffi_ref!(engine, 0);
+    engine.preedit.attributes.len() as c_uint
+}
+
+/// Get one preedit formatting range's UTF-8 start byte offset.
+#[unsafe(no_mangle)]
+pub extern "C" fn karukan_engine_get_preedit_attribute_start(
+    engine: *const KarukanEngine,
+    index: c_uint,
+) -> c_uint {
+    let engine = ffi_ref!(engine, 0);
+    engine
+        .preedit
+        .attributes
+        .get(index as usize)
+        .map(|attribute| attribute.start_bytes)
+        .unwrap_or(0)
+}
+
+/// Get one preedit formatting range's exclusive UTF-8 end byte offset.
+#[unsafe(no_mangle)]
+pub extern "C" fn karukan_engine_get_preedit_attribute_end(
+    engine: *const KarukanEngine,
+    index: c_uint,
+) -> c_uint {
+    let engine = ffi_ref!(engine, 0);
+    engine
+        .preedit
+        .attributes
+        .get(index as usize)
+        .map(|attribute| attribute.end_bytes)
+        .unwrap_or(0)
+}
+
+/// Get one preedit formatting range's `KARUKAN_PREEDIT_STYLE_*` value.
+#[unsafe(no_mangle)]
+pub extern "C" fn karukan_engine_get_preedit_attribute_style(
+    engine: *const KarukanEngine,
+    index: c_uint,
+) -> c_uint {
+    let engine = ffi_ref!(engine, 0);
+    engine
+        .preedit
+        .attributes
+        .get(index as usize)
+        .map(|attribute| attribute.style)
+        .unwrap_or(0)
+}
+
 /// Check if there's a commit pending
 #[unsafe(no_mangle)]
 pub extern "C" fn karukan_engine_has_commit(engine: *const KarukanEngine) -> c_int {

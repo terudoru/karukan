@@ -69,7 +69,7 @@ void karukan_engine_reset(KarukanEngine* engine);
  * Parameters:
  *   engine     - The engine instance
  *   text       - The surrounding text (null-terminated UTF-8)
- *   cursor_pos - Cursor position in bytes (UTF-8 byte offset)
+ *   cursor_pos - Cursor position in Unicode code points
  *
  * The text before cursor_pos will be used as left context for conversion.
  */
@@ -103,6 +103,33 @@ uint32_t karukan_engine_get_preedit_len(const KarukanEngine* engine);
  * This indicates where the cursor should be displayed within the preedit text.
  */
 uint32_t karukan_engine_get_preedit_caret(const KarukanEngine* engine);
+
+/* Preedit styles returned by karukan_engine_get_preedit_attribute_style(). */
+enum KarukanPreeditStyle {
+    KARUKAN_PREEDIT_STYLE_UNDERLINE = 0,
+    KARUKAN_PREEDIT_STYLE_UNDERLINE_DOUBLE = 1,
+    KARUKAN_PREEDIT_STYLE_HIGHLIGHT = 2,
+    KARUKAN_PREEDIT_STYLE_REVERSE = 3,
+};
+
+/* Get the number of formatted ranges in the current preedit. */
+uint32_t karukan_engine_get_preedit_attribute_count(const KarukanEngine* engine);
+
+/* Get one formatted range as exclusive UTF-8 byte offsets. */
+uint32_t karukan_engine_get_preedit_attribute_start(
+    const KarukanEngine* engine,
+    uint32_t index
+);
+uint32_t karukan_engine_get_preedit_attribute_end(
+    const KarukanEngine* engine,
+    uint32_t index
+);
+
+/* Get one formatted range's KarukanPreeditStyle value. */
+uint32_t karukan_engine_get_preedit_attribute_style(
+    const KarukanEngine* engine,
+    uint32_t index
+);
 
 /* --- Commit text --- */
 

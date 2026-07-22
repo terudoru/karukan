@@ -78,15 +78,26 @@ final class TransportTests: XCTestCase {
         // completes via onRestart on the main queue; wait(for:) pumps the
         // run loop so that completion can fire.
         let restarted = expectation(description: "server restarted")
+        let prepared = expectation(description: "frontend prepared before restart")
+        process.onWillRestart = {
+            prepared.fulfill()
+        }
         let previousOnRestart = process.onRestart
         process.onRestart = {
             previousOnRestart?()
             restarted.fulfill()
         }
         process.restart()
-        wait(for: [restarted], timeout: 5.0)
+        wait(for: [prepared, restarted], timeout: 5.0)
         let data = client.sendRequestSync(method: "status", params: [:], timeout: 5.0)
         XCTAssertNotNil(data)
+    }
+}
+
+final class RestartPreeditTests: XCTestCase {
+    func testFallbackCommitRemovesInternalSegmentSeparators() {
+        XCTAssertEqual(visiblePreeditCommitText("今日\u{200B}は\u{200B}晴れ"), "今日は晴れ")
+        XCTAssertEqual(visiblePreeditCommitText("通常の未確定文字列"), "通常の未確定文字列")
     }
 }
 

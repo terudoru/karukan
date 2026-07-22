@@ -46,6 +46,7 @@ pub(crate) use ffi_ref;
 
 use karukan_im::config::Settings;
 use karukan_im::core::engine::{EngineAction, EngineConfig, InputMethodEngine};
+use karukan_im::core::preedit::AttributeType;
 
 static INIT_LOGGING: Once = Once::new();
 
@@ -66,7 +67,37 @@ fn init_logging() {
 struct PreeditCache {
     text: CString,
     caret_bytes: u32,
+    attributes: Vec<PreeditAttributeCache>,
     dirty: bool,
+}
+
+/// One preedit style range, expressed as UTF-8 byte offsets for fcitx5.
+#[derive(Default)]
+struct PreeditAttributeCache {
+    start_bytes: u32,
+    end_bytes: u32,
+    style: u32,
+}
+
+const PREEDIT_STYLE_UNDERLINE: u32 = 0;
+const PREEDIT_STYLE_UNDERLINE_DOUBLE: u32 = 1;
+const PREEDIT_STYLE_HIGHLIGHT: u32 = 2;
+const PREEDIT_STYLE_REVERSE: u32 = 3;
+
+fn char_offset_to_byte(text: &str, offset: usize) -> usize {
+    text.char_indices()
+        .nth(offset)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len())
+}
+
+fn preedit_style(attribute_type: AttributeType) -> u32 {
+    match attribute_type {
+        AttributeType::Underline => PREEDIT_STYLE_UNDERLINE,
+        AttributeType::UnderlineDouble => PREEDIT_STYLE_UNDERLINE_DOUBLE,
+        AttributeType::Highlight => PREEDIT_STYLE_HIGHLIGHT,
+        AttributeType::Reverse => PREEDIT_STYLE_REVERSE,
+    }
 }
 
 /// Cached candidate list for FFI consumption.
@@ -147,14 +178,21 @@ impl KarukanEngine {
         for action in actions {
             match action {
                 EngineAction::UpdatePreedit(preedit) => {
-                    let caret_chars = preedit.caret();
-                    let caret_bytes = preedit
-                        .text()
-                        .char_indices()
-                        .nth(caret_chars)
-                        .map(|(i, _)| i)
-                        .unwrap_or(preedit.text().len());
-                    self.preedit.caret_bytes = caret_bytes as u32;
+                    self.preedit.caret_bytes =
+                        char_offset_to_byte(preedit.text(), preedit.caret()) as u32;
+                    self.preedit.attributes = preedit
+                        .attributes()
+                        .iter()
+                        .filter_map(|attribute| {
+                            let start = char_offset_to_byte(preedit.text(), attribute.start);
+                            let end = char_offset_to_byte(preedit.text(), attribute.end);
+                            (start < end).then_some(PreeditAttributeCache {
+                                start_bytes: start as u32,
+                                end_bytes: end as u32,
+                                style: preedit_style(attribute.attr_type),
+                            })
+                        })
+                        .collect();
                     self.preedit.text = CString::new(preedit.text()).unwrap_or_default();
                     self.preedit.dirty = true;
                 }

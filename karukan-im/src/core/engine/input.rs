@@ -224,8 +224,10 @@ impl InputMethodEngine {
             // different conversion path — PredictAndConvert — in the same spirit).
             Keysym::TAB => self.start_conversion(true),
             Keysym::SPACE | Keysym::DOWN => self.start_conversion(false),
-            Keysym::LEFT => self.start_segment_navigation(-1),
-            Keysym::RIGHT => self.start_segment_navigation(1),
+            // Before conversion starts, arrows edit the composing buffer.
+            // Segment navigation begins after Space/Down enters Conversion.
+            Keysym::LEFT => self.move_caret_left(),
+            Keysym::RIGHT => self.move_caret_right(),
             Keysym::HOME => self.move_caret_home(),
             Keysym::END => self.move_caret_end(),
             _ => {

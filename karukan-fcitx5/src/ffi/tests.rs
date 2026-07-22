@@ -120,6 +120,16 @@ fn test_null_engine_safety() {
     assert_eq!(karukan_engine_has_preedit(ptr::null()), 0);
     assert!(karukan_engine_get_preedit(ptr::null()).is_null());
     assert_eq!(karukan_engine_get_preedit_len(ptr::null()), 0);
+    assert_eq!(karukan_engine_get_preedit_attribute_count(ptr::null()), 0);
+    assert_eq!(
+        karukan_engine_get_preedit_attribute_start(ptr::null(), 0),
+        0
+    );
+    assert_eq!(karukan_engine_get_preedit_attribute_end(ptr::null(), 0), 0);
+    assert_eq!(
+        karukan_engine_get_preedit_attribute_style(ptr::null(), 0),
+        0
+    );
     assert_eq!(karukan_engine_has_commit(ptr::null()), 0);
     assert!(karukan_engine_get_commit(ptr::null()).is_null());
     assert_eq!(karukan_engine_has_candidates(ptr::null()), 0);
@@ -237,6 +247,35 @@ fn test_cstring_null_termination() {
     // This should not crash - CStr::from_ptr requires null termination
     let preedit = unsafe { CStr::from_ptr(preedit_ptr) };
     assert!(!preedit.to_str().unwrap().is_empty());
+}
+
+#[test]
+fn test_preedit_attributes_cross_ffi_as_utf8_byte_ranges() {
+    use karukan_im::core::preedit::{AttributeType, Preedit, PreeditAttribute};
+
+    let e = TestEngine::new();
+    let mut preedit = Preedit::with_text("愛\u{200B}上");
+    preedit.set_attributes(vec![
+        PreeditAttribute::new(0, 1, AttributeType::Underline),
+        PreeditAttribute::new(2, 3, AttributeType::Highlight),
+    ]);
+    let engine = unsafe { &mut *e.ptr() };
+    engine.apply_actions(vec![EngineAction::UpdatePreedit(preedit)]);
+
+    assert_eq!(karukan_engine_get_preedit_attribute_count(e.ptr()), 2);
+    assert_eq!(karukan_engine_get_preedit_attribute_start(e.ptr(), 0), 0);
+    assert_eq!(karukan_engine_get_preedit_attribute_end(e.ptr(), 0), 3);
+    assert_eq!(
+        karukan_engine_get_preedit_attribute_style(e.ptr(), 0),
+        PREEDIT_STYLE_UNDERLINE
+    );
+    assert_eq!(karukan_engine_get_preedit_attribute_start(e.ptr(), 1), 6);
+    assert_eq!(karukan_engine_get_preedit_attribute_end(e.ptr(), 1), 9);
+    assert_eq!(
+        karukan_engine_get_preedit_attribute_style(e.ptr(), 1),
+        PREEDIT_STYLE_HIGHLIGHT
+    );
+    assert_eq!(karukan_engine_get_preedit_attribute_end(e.ptr(), 99), 0);
 }
 
 #[test]

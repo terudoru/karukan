@@ -93,22 +93,23 @@ fn test_cursor_move_left_right() {
     assert_eq!(engine.preedit().unwrap().caret(), 3); // cursor at end
 
     // Move left -> cursor between "い" and "う"
-    engine.process_key(&press_ctrl(Keysym::KEY_B));
+    engine.process_key(&press_key(Keysym::LEFT));
+    assert!(matches!(engine.state(), InputState::Composing { .. }));
     assert_eq!(engine.preedit().unwrap().text(), "あいう");
     assert_eq!(engine.preedit().unwrap().caret(), 2);
 
     // Move left again -> cursor between "あ" and "い"
-    engine.process_key(&press_ctrl(Keysym::KEY_B));
+    engine.process_key(&press_key(Keysym::LEFT));
     assert_eq!(engine.preedit().unwrap().text(), "あいう");
     assert_eq!(engine.preedit().unwrap().caret(), 1);
 
     // Move right -> cursor between "い" and "う"
-    engine.process_key(&press_ctrl(Keysym::KEY_F));
+    engine.process_key(&press_key(Keysym::RIGHT));
     assert_eq!(engine.preedit().unwrap().text(), "あいう");
     assert_eq!(engine.preedit().unwrap().caret(), 2);
 
     // Move right -> cursor at end
-    engine.process_key(&press_ctrl(Keysym::KEY_F));
+    engine.process_key(&press_key(Keysym::RIGHT));
     assert_eq!(engine.preedit().unwrap().text(), "あいう");
     assert_eq!(engine.preedit().unwrap().caret(), 3);
 }
@@ -122,11 +123,11 @@ fn test_cursor_left_boundary() {
     assert_eq!(engine.preedit().unwrap().caret(), 1);
 
     // Move left past start
-    engine.process_key(&press_ctrl(Keysym::KEY_B));
+    engine.process_key(&press_key(Keysym::LEFT));
     assert_eq!(engine.preedit().unwrap().caret(), 0);
 
     // Move left again - should stay at 0
-    engine.process_key(&press_ctrl(Keysym::KEY_B));
+    engine.process_key(&press_key(Keysym::LEFT));
     assert_eq!(engine.preedit().unwrap().caret(), 0);
 }
 
@@ -139,7 +140,7 @@ fn test_cursor_right_boundary() {
     assert_eq!(engine.preedit().unwrap().caret(), 1);
 
     // Move right past end - should stay at 1
-    engine.process_key(&press_ctrl(Keysym::KEY_F));
+    engine.process_key(&press_key(Keysym::RIGHT));
     assert_eq!(engine.preedit().unwrap().caret(), 1);
 }
 
@@ -153,7 +154,7 @@ fn test_cursor_insert_in_middle() {
     assert_eq!(engine.preedit().unwrap().text(), "あう");
 
     // Move left to before "う"
-    engine.process_key(&press_ctrl(Keysym::KEY_B));
+    engine.process_key(&press_key(Keysym::LEFT));
     assert_eq!(engine.preedit().unwrap().caret(), 1);
 
     // Type "い" (i) - should insert between "あ" and "う"
@@ -172,7 +173,7 @@ fn test_cursor_insert_romaji_in_middle() {
     assert_eq!(engine.preedit().unwrap().text(), "あう");
 
     // Move left to before "う"
-    engine.process_key(&press_ctrl(Keysym::KEY_B));
+    engine.process_key(&press_key(Keysym::LEFT));
 
     // Type "ka" - 'k' goes to buffer, then 'a' produces "か"
     engine.process_key(&press('k'));

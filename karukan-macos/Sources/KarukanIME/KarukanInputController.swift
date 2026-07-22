@@ -1,6 +1,13 @@
 import Cocoa
 import InputMethodKit
 
+/// Internal separators make adjacent conversion segments distinct to IMK,
+/// but they are not user text and must not survive a frontend-side fallback
+/// commit when the engine process disappears.
+func visiblePreeditCommitText(_ text: String) -> String {
+    text.replacingOccurrences(of: "\u{200B}", with: "")
+}
+
 /// Thin InputMethodKit adapter for the karukan engine.
 ///
 /// All IME state (Empty → Composing → Conversion, romaji conversion,
@@ -10,10 +17,13 @@ import InputMethodKit
 @objc(KarukanInputController)
 class KarukanInputController: IMKInputController {
     static let candidateWindow = CandidateWindowController()
+    private static weak var activeController: KarukanInputController?
 
     /// Mirrors whether the engine currently shows a preedit (updated from
     /// engine actions). Used to decide when to refresh surrounding text.
     private var hasPreedit = false
+    private var displayedPreedit = ""
+    private weak var activeClientObject: AnyObject?
 
     /// Detects the lone right-⌘ tap that returns to hiragana mode on
     /// keyboards without a JIS かな key (issue #33).
@@ -46,6 +56,7 @@ class KarukanInputController: IMKInputController {
 
         guard event.type == .keyDown else { return false }
         guard let client = sender as? (any IMKTextInput) else { return false }
+        activeClientObject = client as AnyObject
 
         // A real key press means any held right ⌘ is a shortcut modifier,
         // not a pending tap.
@@ -103,6 +114,17 @@ class KarukanInputController: IMKInputController {
 
     // MARK: - Lifecycle
 
+    /// Preserve the currently displayed composition before the shared engine
+    /// is replaced. The replacement starts empty, so waiting for its first key
+    /// would otherwise overwrite the old marked text.
+    static func prepareForEngineRestart() {
+        guard let controller = activeController else {
+            candidateWindow.hide()
+            return
+        }
+        controller.commitDisplayedPreeditLocally()
+    }
+
     override func deactivateServer(_ sender: Any!) {
         // A right-⌘ press armed before a focus switch must not fire after
         // it (e.g. right-⌘-clicking another window).
@@ -113,6 +135,7 @@ class KarukanInputController: IMKInputController {
             flushComposition(client: client)
         } else {
             Self.candidateWindow.hide()
+            clearCompositionTracking()
         }
         engineClient.saveLearningAsync()
         super.deactivateServer(sender)
@@ -123,6 +146,7 @@ class KarukanInputController: IMKInputController {
             flushComposition(client: client)
         } else {
             Self.candidateWindow.hide()
+            clearCompositionTracking()
         }
     }
 
@@ -132,8 +156,40 @@ class KarukanInputController: IMKInputController {
         if let result = engineClient.commitSync() {
             apply(actions: result.actions, client: client)
         } else {
-            // Engine unavailable: still drop any stale candidate panel.
+            // The engine no longer knows this composition, but IMK still
+            // displays it. Commit the exact visible text rather than leaving
+            // a stuck marked range or silently losing it.
+            commitDisplayedPreeditLocally(client: client)
+        }
+    }
+
+    private func commitDisplayedPreeditLocally() {
+        guard let client = activeClientObject as? (any IMKTextInput) else {
             Self.candidateWindow.hide()
+            clearCompositionTracking()
+            return
+        }
+        commitDisplayedPreeditLocally(client: client)
+    }
+
+    private func commitDisplayedPreeditLocally(client: any IMKTextInput) {
+        let text = visiblePreeditCommitText(displayedPreedit)
+        if hasPreedit, !text.isEmpty {
+            client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+        }
+        // If the old process is merely slow rather than dead, discard its
+        // stale composition before it can reappear on the next key event.
+        engineClient.resetAsync()
+        Self.candidateWindow.hide()
+        clearCompositionTracking()
+    }
+
+    private func clearCompositionTracking() {
+        hasPreedit = false
+        displayedPreedit = ""
+        activeClientObject = nil
+        if Self.activeController === self {
+            Self.activeController = nil
         }
     }
 
@@ -168,11 +224,18 @@ class KarukanInputController: IMKInputController {
                 // composition; since #46 the engine no longer pairs Commit
                 // with an empty UpdatePreedit, so clear the flag here or the
                 // next keystroke would skip the surrounding-text refresh.
-                hasPreedit = false
+                clearCompositionTracking()
                 client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
 
             case .updatePreedit(let text, let caret, let attributes):
                 hasPreedit = !text.isEmpty
+                displayedPreedit = text
+                if hasPreedit {
+                    activeClientObject = client as AnyObject
+                    Self.activeController = self
+                } else {
+                    clearCompositionTracking()
+                }
                 setMarkedText(text: text, caret: caret, attributes: attributes, client: client)
 
             case .showCandidates(let candidates, let cursor, let page, let totalPages):

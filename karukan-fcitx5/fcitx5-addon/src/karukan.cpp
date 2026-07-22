@@ -201,7 +201,44 @@ void KarukanState::updateUI() {
 
         Text preedit;
         if (preeditText && preeditLen > 0) {
-            preedit.append(std::string(preeditText, preeditLen), TextFormatFlag::Underline);
+            const auto appendUnattributedRange =
+                [&preedit, preeditText](uint32_t start, uint32_t end) {
+                    std::string text(preeditText + start, end - start);
+                    // Only the engine's internal U+200B segment separator is
+                    // non-committable. Preserve and underline any unexpected
+                    // unattributed text instead of silently dropping it.
+                    const auto format = text == "\xE2\x80\x8B"
+                                            ? TextFormatFlag::DontCommit
+                                            : TextFormatFlag::Underline;
+                    preedit.append(std::move(text), format);
+                };
+            uint32_t offset = 0;
+            const uint32_t attributeCount =
+                karukan_engine_get_preedit_attribute_count(rustEngine_);
+            for (uint32_t i = 0; i < attributeCount; i++) {
+                const uint32_t start =
+                    karukan_engine_get_preedit_attribute_start(rustEngine_, i);
+                const uint32_t end =
+                    karukan_engine_get_preedit_attribute_end(rustEngine_, i);
+                if (start < offset || end <= start || end > preeditLen) {
+                    continue;
+                }
+                if (start > offset) {
+                    appendUnattributedRange(offset, start);
+                }
+
+                const uint32_t style =
+                    karukan_engine_get_preedit_attribute_style(rustEngine_, i);
+                const auto format =
+                    style == KARUKAN_PREEDIT_STYLE_UNDERLINE
+                        ? TextFormatFlag::Underline
+                        : TextFormatFlag::HighLight;
+                preedit.append(std::string(preeditText + start, end - start), format);
+                offset = end;
+            }
+            if (offset < preeditLen) {
+                appendUnattributedRange(offset, preeditLen);
+            }
             preedit.setCursor(static_cast<int>(preeditCaret));
         }
 

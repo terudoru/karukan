@@ -69,6 +69,9 @@ _ = server  // keep the IMKServer alive
 
 let engineProcess = EngineProcess()
 let engineClient = EngineClient(serverProcess: engineProcess)
+engineProcess.onWillRestart = {
+    KarukanInputController.prepareForEngineRestart()
+}
 
 if engineProcess.start() {
     engineClient.startReaderLoop()

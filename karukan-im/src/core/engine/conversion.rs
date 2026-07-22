@@ -1336,19 +1336,6 @@ impl InputMethodEngine {
         self.navigate_candidate(CandidateList::prev_page)
     }
 
-    pub(super) fn start_segment_navigation(&mut self, delta: isize) -> EngineResult {
-        let start_result = self.start_conversion(false);
-        if !matches!(self.state, InputState::Conversion { .. }) {
-            return start_result;
-        }
-        let move_result = self.move_conversion_segment(delta);
-        if move_result.actions.is_empty() {
-            start_result
-        } else {
-            move_result
-        }
-    }
-
     fn move_conversion_segment(&mut self, delta: isize) -> EngineResult {
         if matches!(
             &self.state,

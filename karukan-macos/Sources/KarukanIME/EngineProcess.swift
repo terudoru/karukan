@@ -17,6 +17,11 @@ class EngineProcess {
     /// re-attach its reader loop and re-send `init`.
     var onRestart: (() -> Void)?
 
+    /// Called on the main queue before a forced replacement, or after an
+    /// unexpected exit before its replacement is scheduled. The IMK adapter
+    /// uses this to preserve marked text that the new engine cannot recover.
+    var onWillRestart: (() -> Void)?
+
     private let serverPathOverride: String?
 
     /// `serverPath` overrides the bundled binary location (used by tests
@@ -103,6 +108,7 @@ class EngineProcess {
     private func handleTermination(of terminatedProcess: Process) {
         guard process === terminatedProcess, shouldRestart else { return }
 
+        onWillRestart?()
         scheduleRestart()
     }
 
@@ -142,6 +148,7 @@ class EngineProcess {
     /// pass-through). Must be called on the main queue.
     func restart() {
         guard !restartInFlight else { return }
+        onWillRestart?()
         restartInFlight = true
         pendingRestart?.cancel()
         pendingRestart = nil
