@@ -53,21 +53,18 @@ impl InputMethodEngine {
             return Ok(());
         }
 
+        let learning_enabled = settings.learning.enabled;
         let settings = settings.clone();
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("karukan-resource-init".to_string())
             .spawn(move || {
-                let config = EngineConfig::from_settings(&settings);
-                let mut loader = InputMethodEngine::with_config(config);
-                let result = loader
-                    .init_from_settings(&settings)
-                    .map(|()| Box::new(loader))
-                    .map_err(|error| format!("{error:#}"));
-                let _ = sender.send(result);
+                let loader = build_async_resources(&settings);
+                let _ = sender.send(Ok(Box::new(loader)));
             })
             .context("failed to start resource initialization thread")?;
         self.resource_initialization = Some(receiver);
+        self.learning_initialization_pending = learning_enabled;
         Ok(())
     }
 
@@ -104,6 +101,14 @@ impl InputMethodEngine {
         self.converters.light_kanji = loaded.converters.light_kanji.take();
         self.dicts = loaded.dicts;
         self.learning = loaded.learning;
+        self.learning_initialization_pending = false;
+        if let Some(cache) = &mut self.learning {
+            for (reading, surface) in self.pending_learning.drain(..) {
+                cache.record(&reading, &surface);
+            }
+        } else {
+            self.pending_learning.clear();
+        }
         self.dictionary_update = loaded.dictionary_update.take();
         // A pre-init refresh may have cached pass-through chunks. Force the
         // next idle refresh to use the newly installed dictionaries/models.
@@ -136,10 +141,28 @@ impl InputMethodEngine {
                 );
             }
             Err(error) => {
+                self.learning_initialization_pending = false;
+                self.pending_learning.clear();
                 tracing::warn!("Resource initialization failed; keeping rule-based input: {error}");
             }
         }
     }
+}
+
+/// Load every resource usable by the async frontend. A model configuration
+/// error must not discard dictionaries or learning that already loaded: the
+/// engine can still provide fast dictionary conversion and remember choices.
+fn build_async_resources(settings: &Settings) -> InputMethodEngine {
+    let config = EngineConfig::from_settings(settings);
+    let mut loader = InputMethodEngine::with_config(config);
+    loader.init_non_model_state(settings);
+    match load_model_converters(settings) {
+        Ok(loaded) => loader.install_model_converters(loaded),
+        Err(error) => tracing::warn!(
+            "Model initialization failed; keeping dictionary and learning resources: {error:#}"
+        ),
+    }
+    loader
 }
 
 /// Build the configured model set without borrowing the live input engine.
@@ -518,6 +541,51 @@ mod resource_initialization_tests {
         assert_eq!(engine.model_name(), "unknown");
         assert_eq!(engine.input_buf.text, "か");
         assert!(matches!(engine.state(), InputState::Composing { .. }));
+    }
+
+    #[test]
+    fn startup_learning_is_replayed_into_the_loaded_cache() {
+        let (sender, receiver) = mpsc::channel();
+        let mut engine = InputMethodEngine::new();
+        engine.resource_initialization = Some(receiver);
+        engine.learning_initialization_pending = true;
+        engine.record_learning("あい", "愛");
+        assert_eq!(engine.pending_learning, vec![("あい".into(), "愛".into())]);
+
+        let mut loaded = InputMethodEngine::new();
+        loaded.learning = Some(LearningCache::new(LearningConfig::default()));
+        sender.send(Ok(Box::new(loaded))).unwrap();
+        engine.poll_resource_initialization();
+
+        assert!(engine.pending_learning.is_empty());
+        assert_eq!(engine.learning.as_ref().unwrap().lookup("あい")[0].0, "愛");
+    }
+
+    #[test]
+    fn invalid_model_does_not_discard_a_loaded_dictionary() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.json");
+        let dictionary_path = directory.path().join("dict.bin");
+        std::fs::write(
+            &source,
+            r#"[{"reading":"じしょ","candidates":[{"surface":"辞書","score":1.0}]}]"#,
+        )
+        .unwrap();
+        Dictionary::build_from_json(&source)
+            .unwrap()
+            .save(&dictionary_path)
+            .unwrap();
+
+        let mut settings = Settings::default();
+        settings.conversion.strategy = StrategyMode::Main;
+        settings.conversion.model = Some("not-a-real-model".to_string());
+        settings.conversion.dict_path = Some(dictionary_path.to_string_lossy().into_owned());
+        settings.learning.enabled = false;
+        settings.dictionary_update.enabled = false;
+
+        let loaded = build_async_resources(&settings);
+        assert!(loaded.converters.kanji.is_none());
+        assert!(loaded.dicts.system.is_some());
     }
 
     #[test]

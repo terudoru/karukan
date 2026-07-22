@@ -1444,6 +1444,9 @@ impl InputMethodEngine {
     pub(super) fn record_learning(&mut self, reading: &str, surface: &str) {
         if let Some(cache) = &mut self.learning {
             cache.record(reading, surface);
+        } else if self.learning_initialization_pending && self.pending_learning.len() < 256 {
+            self.pending_learning
+                .push((reading.to_string(), surface.to_string()));
         }
     }
 

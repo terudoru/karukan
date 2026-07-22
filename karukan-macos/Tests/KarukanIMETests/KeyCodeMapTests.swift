@@ -34,6 +34,17 @@ final class KeyCodeMapTests: XCTestCase {
         XCTAssertEqual(usableCandidateCursorRect(rect), rect)
     }
 
+    func testSurroundingTextCaptureIsDeferredOnlyForFirstTextKey() {
+        let ascii = EngineKeyEvent(keysym: 0x61, modifiers: KeyModifiers())
+        let unicode = EngineKeyEvent(keysym: 0x0100_3016, modifiers: KeyModifiers())
+        let left = EngineKeyEvent(keysym: 0xff51, modifiers: KeyModifiers())
+
+        XCTAssertTrue(shouldDeferSurroundingTextRefresh(hasPreedit: false, key: ascii))
+        XCTAssertTrue(shouldDeferSurroundingTextRefresh(hasPreedit: false, key: unicode))
+        XCTAssertFalse(shouldDeferSurroundingTextRefresh(hasPreedit: true, key: ascii))
+        XCTAssertFalse(shouldDeferSurroundingTextRefresh(hasPreedit: false, key: left))
+    }
+
     func testPrintableAscii() {
         let event = KeyCodeMap.translate(
             keyCode: 0, characters: "a", charactersIgnoringModifiers: "a", flags: [])

@@ -27,6 +27,13 @@ func shouldScheduleDeferredLiveRefresh(
     return hasComposingPreedit && isComposingUpdate
 }
 
+func shouldDeferSurroundingTextRefresh(hasPreedit: Bool, key: EngineKeyEvent) -> Bool {
+    guard !hasPreedit else { return false }
+    // ASCII/Latin-1 keysyms and XKB Unicode keysyms can begin marked text.
+    // Navigation/function keys live in the 0xff00 range and cannot.
+    return key.keysym < 0xff00 || (0x0100_0100...0x0110_ffff).contains(key.keysym)
+}
+
 struct PreeditSnapshot: Equatable {
     let text: String
     let caret: Int
@@ -139,16 +146,8 @@ class KarukanInputController: IMKInputController {
         guard let key = KeyCodeMap.translate(event: event) else { return false }
         invalidateLiveRefresh()
 
-        // Refresh the conversion context while no composition is active
-        // (mirrors the fcitx5 addon, which captures surrounding text in the
-        // Empty state). Queued before process_key on the same pipe, so the
-        // engine sees it first. Skipped for function/navigation keysyms
-        // (0xff00 range): they can't start a composition, and the three
-        // synchronous client IPCs in sendSurroundingText would otherwise
-        // fire on every arrow-key repeat.
-        if !hasPreedit && key.keysym < 0xff00 {
-            sendSurroundingText(client: client)
-        }
+        let refreshSurroundingTextAfterKey = shouldDeferSurroundingTextRefresh(
+            hasPreedit: hasPreedit, key: key)
 
         guard let result = engineClient.processKeySync(key) else {
             // Engine busy or dead: let the key pass through rather than
@@ -156,6 +155,18 @@ class KarukanInputController: IMKInputController {
             return false
         }
         apply(actions: result.actions, client: client)
+        if result.consumed && refreshSurroundingTextAfterKey {
+            // Host document access is synchronous and app-dependent. Run it
+            // after returning the rule-based first-key update; the queued
+            // JSON-RPC request still reaches the engine before the 250 ms
+            // deferred live-conversion refresh.
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                    let activeClient = self.activeClientObject as? (any IMKTextInput)
+                else { return }
+                self.sendSurroundingText(client: activeClient)
+            }
+        }
         if result.consumed && shouldScheduleDeferredLiveRefresh(after: result.actions, key: key) {
             scheduleLiveRefresh()
         }
@@ -421,7 +432,6 @@ class KarukanInputController: IMKInputController {
         // apps, so this also self-heals on the next successful capture.
         let selected = client.selectedRange()
         guard selected.location != NSNotFound, selected.location > 0 else {
-            NSLog("KarukanIME: surrounding text cleared (no usable selection)")
             engineClient.setSurroundingTextAsync(text: "", cursorPos: 0)
             return
         }
@@ -436,12 +446,10 @@ class KarukanInputController: IMKInputController {
         guard let leftContext = client.string(from: range, actualRange: &actualRange),
             !leftContext.isEmpty
         else {
-            NSLog("KarukanIME: surrounding text cleared (string(from:) unavailable)")
             engineClient.setSurroundingTextAsync(text: "", cursorPos: 0)
             return
         }
 
-        NSLog("KarukanIME: surrounding text captured (\(leftContext.count) chars)")
         engineClient.setSurroundingTextAsync(
             text: leftContext,
             cursorPos: leftContext.unicodeScalars.count

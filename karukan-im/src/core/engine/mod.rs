@@ -142,6 +142,10 @@ pub struct InputMethodEngine {
     dicts: Dictionaries,
     /// Learning cache (user conversion history)
     learning: Option<LearningCache>,
+    /// Selections made during asynchronous startup. Replayed into the loaded
+    /// cache so the first few words after login are not silently forgotten.
+    pending_learning: Vec<(String, String)>,
+    learning_initialization_pending: bool,
     /// Result channel for the non-blocking system dictionary update check.
     dictionary_update: Option<Receiver<Result<BackgroundDictionaryUpdate, String>>>,
     /// Dictionaries and models can take seconds to initialize on a cold
@@ -175,6 +179,8 @@ impl InputMethodEngine {
             chunks: Vec::new(),
             dicts: Dictionaries::default(),
             learning: None,
+            pending_learning: Vec::new(),
+            learning_initialization_pending: false,
             dictionary_update: None,
             resource_initialization: None,
             defer_live_conversion: false,
