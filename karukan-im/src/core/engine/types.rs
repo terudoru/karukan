@@ -31,6 +31,8 @@ pub struct EngineResult {
     pub consumed: bool,
     /// Actions to perform
     pub actions: Vec<EngineAction>,
+    /// A deferred live-conversion refresh has more chunks to resolve.
+    pub needs_live_refresh: bool,
 }
 
 impl EngineResult {
@@ -38,6 +40,7 @@ impl EngineResult {
         Self {
             consumed: true,
             actions: Vec::new(),
+            needs_live_refresh: false,
         }
     }
 
@@ -45,6 +48,7 @@ impl EngineResult {
         Self {
             consumed: false,
             actions: Vec::new(),
+            needs_live_refresh: false,
         }
     }
 
@@ -265,6 +269,9 @@ pub(in crate::core) struct ComposingChunk {
     /// Model conversion of `reading` — this chunk's slice of the live preedit.
     /// Falls back to `reading` when the model yields nothing.
     pub converted: String,
+    /// Whether neural conversion has been attempted for this chunk. The macOS
+    /// deferred path intentionally resolves only one Japanese chunk per RPC.
+    pub resolved: bool,
 }
 
 /// Live conversion state: enabled flag and current converted text

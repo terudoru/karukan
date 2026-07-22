@@ -236,6 +236,7 @@ fn test_deferred_live_conversion_protocol_round_trip() {
         json!({"jsonrpc":"2.0","id":31,"method":"refresh_live_conversion","params":{}}),
     );
     assert_eq!(resp["result"]["consumed"], true);
+    assert_eq!(resp["result"]["needs_live_refresh"], false);
     assert!(!actions_of(&resp, "update_preedit").is_empty());
 }
 

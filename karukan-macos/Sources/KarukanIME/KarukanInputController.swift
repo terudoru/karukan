@@ -278,20 +278,33 @@ class KarukanInputController: IMKInputController {
         let generation = liveRefreshGeneration
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.liveRefreshGeneration == generation else { return }
-            engineClient.refreshLiveConversionAsync { [weak self] result in
-                DispatchQueue.main.async {
-                    guard let self,
-                        self.liveRefreshGeneration == generation,
-                        let result,
-                        let client = self.activeClientObject as? (any IMKTextInput)
-                    else { return }
-                    self.apply(actions: result.actions, client: client)
-                }
-            }
+            self.requestLiveRefresh(generation: generation)
         }
         pendingLiveRefresh = work
         DispatchQueue.main.asyncAfter(
             deadline: .now() + .milliseconds(liveRefreshDebounceMilliseconds), execute: work)
+    }
+
+    private func requestLiveRefresh(generation: Int) {
+        engineClient.refreshLiveConversionAsync { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self,
+                    self.liveRefreshGeneration == generation,
+                    let result,
+                    let client = self.activeClientObject as? (any IMKTextInput)
+                else { return }
+                self.apply(actions: result.actions, client: client)
+                guard result.needsLiveRefresh == true else { return }
+                let continuation = DispatchWorkItem { [weak self] in
+                    guard let self, self.liveRefreshGeneration == generation else { return }
+                    self.requestLiveRefresh(generation: generation)
+                }
+                self.pendingLiveRefresh = continuation
+                // Yield between chunks so newly typed keys enter the server
+                // before the next model call.
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(50), execute: continuation)
+            }
+        }
     }
 
     private func selectCandidateFromWindow(pageIndex: Int) {

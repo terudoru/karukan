@@ -173,6 +173,7 @@ impl ImServer {
         serde_json::to_value(KeyResult {
             consumed: result.consumed,
             actions,
+            needs_live_refresh: result.needs_live_refresh,
             conversion_ms: self.engine.last_conversion_ms(),
             process_key_ms: self.engine.last_process_key_ms(),
         })

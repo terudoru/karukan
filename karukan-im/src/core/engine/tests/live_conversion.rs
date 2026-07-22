@@ -131,6 +131,53 @@ fn deferred_live_refresh_is_inert_after_composition_ends() {
 }
 
 #[test]
+fn deferred_long_refresh_resolves_only_one_neural_chunk_per_request() {
+    let mut engine = make_live_conversion_engine();
+    engine.config.composing_chunk_len = 2;
+    engine.init_kanji_converter().unwrap();
+    engine.process_key_deferred_live(&press('a'));
+    engine.input_buf.clear();
+    engine.input_buf.insert("あいうえおか");
+
+    let first = engine.refresh_live_conversion();
+    assert!(first.needs_live_refresh);
+    assert_eq!(engine.chunks.len(), 3);
+    assert_eq!(
+        engine.chunks.iter().filter(|chunk| chunk.resolved).count(),
+        1
+    );
+    assert!(engine.converters.kanji.is_some());
+
+    let second = engine.refresh_live_conversion();
+    assert!(second.needs_live_refresh);
+    assert_eq!(
+        engine.chunks.iter().filter(|chunk| chunk.resolved).count(),
+        2
+    );
+
+    let third = engine.refresh_live_conversion();
+    assert!(!third.needs_live_refresh);
+    assert!(engine.chunks.iter().all(|chunk| chunk.resolved));
+}
+
+#[test]
+fn deferred_refresh_waits_for_async_model_without_completing_raw_chunks() {
+    let mut engine = make_live_conversion_engine();
+    engine.config.composing_chunk_len = 2;
+    engine.process_key_deferred_live(&press('a'));
+    engine.input_buf.clear();
+    engine.input_buf.insert("あいうえ");
+    let (_sender, receiver) = std::sync::mpsc::channel();
+    engine.resource_initialization = Some(receiver);
+
+    let result = engine.refresh_live_conversion();
+
+    assert!(result.needs_live_refresh);
+    assert!(engine.chunks.iter().all(|chunk| !chunk.resolved));
+    assert!(engine.converters.kanji.is_none());
+}
+
+#[test]
 fn test_live_conversion_off_unchanged() {
     // With live_conversion=false, composing remains plain hiragana and must
     // not initialize a neural model whose output would be discarded.

@@ -13,6 +13,7 @@ func supportsEngineProtocol(_ version: Int) -> Bool {
 struct KeyResult: Decodable {
     let consumed: Bool
     let actions: [EngineAction]
+    let needsLiveRefresh: Bool?
     let conversionMs: UInt64?
     let processKeyMs: UInt64?
 }

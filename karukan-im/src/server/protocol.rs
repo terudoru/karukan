@@ -137,6 +137,8 @@ pub struct InitResult {
 pub struct KeyResult {
     pub consumed: bool,
     pub actions: Vec<Action>,
+    /// True when another bounded deferred refresh should be requested.
+    pub needs_live_refresh: bool,
     /// Conversion (inference) time for this request in milliseconds;
     /// 0 when no conversion ran.
     pub conversion_ms: u64,

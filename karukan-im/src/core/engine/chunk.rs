@@ -221,18 +221,34 @@ impl InputMethodEngine {
     /// N=30) this produces exactly one model call over the whole buffer, i.e.
     /// identical behavior to a whole-buffer conversion.
     pub(super) fn chunked_auto_suggest(&mut self) -> Option<String> {
+        self.chunked_auto_suggest_with_limit(None).0
+    }
+
+    /// Resolve at most one neural chunk for a deferred frontend refresh. This
+    /// bounds how long a refresh can occupy the single JSON-RPC server, so a
+    /// long unpunctuated sentence cannot queue key events behind several
+    /// consecutive model calls.
+    pub(super) fn chunked_auto_suggest_step(&mut self) -> (Option<String>, bool) {
+        self.chunked_auto_suggest_with_limit(Some(1))
+    }
+
+    fn chunked_auto_suggest_with_limit(
+        &mut self,
+        max_neural_chunks: Option<usize>,
+    ) -> (Option<String>, bool) {
         let full_reading = self.input_buf.text.clone();
         if full_reading.is_empty() {
             self.chunks.clear();
-            return None;
+            return (None, false);
         }
 
         if let Some(user_text) = self.user_dictionary_auto_text(&full_reading) {
             self.chunks = vec![ComposingChunk {
                 reading: full_reading.clone(),
                 converted: user_text.clone(),
+                resolved: true,
             }];
-            return (user_text != full_reading).then_some(user_text);
+            return ((user_text != full_reading).then_some(user_text), false);
         }
 
         self.ensure_kanji_converter();
@@ -250,34 +266,61 @@ impl InputMethodEngine {
         let plan = ChunkPlan::compute(&old_lens, &old_text, &text, chunk_len);
 
         let mut chunks: Vec<ComposingChunk> = Vec::with_capacity(old.len() + 1);
-        let mut combined = String::new();
-
         // 1. Reused leading chunks — reading + converted still valid (their left
         //    context is unchanged because everything before them is unchanged).
         for chunk in old.drain(..plan.lead_count) {
-            combined.push_str(&chunk.converted);
             chunks.push(chunk);
         }
         // `old` now starts at the first non-leading chunk; the trailing
         // chunks to keep are its last `trail_count` entries.
         let trail_start = old.len() - plan.trail_count;
 
-        // 2. Changed middle span: re-chunk and reconvert each new chunk against
-        //    everything converted so far.
+        // 2. Changed middle span: re-chunk first. Neural work is performed in
+        //    the bounded resolution pass below.
         let middle = &text[plan.mid_start..plan.mid_end];
         for chunk in group_chunks(middle, chunk_len) {
             let reading: String = chunk.iter().collect();
-            let new = self.convert_new_chunk(reading, &base_ctx, &combined);
-            combined.push_str(&new.converted);
-            chunks.push(new);
+            let resolved = !reading.chars().next().is_some_and(is_japanese);
+            chunks.push(ComposingChunk {
+                converted: reading.clone(),
+                reading,
+                resolved,
+            });
         }
 
         // 3. Reused trailing chunks — cached conversion kept (the left context
         //    it was converted with may have drifted, but we don't reconvert).
         for chunk in old.drain(trail_start..) {
-            combined.push_str(&chunk.converted);
             chunks.push(chunk);
         }
+
+        let mut remaining = max_neural_chunks.unwrap_or(usize::MAX);
+        while remaining > 0 {
+            let Some(index) = chunks.iter().position(|chunk| !chunk.resolved) else {
+                break;
+            };
+            // An async macOS startup worker will install the converter between
+            // requests. Keep this chunk pending instead of treating temporary
+            // kana pass-through as a completed conversion.
+            if self.converters.kanji.is_none() && self.resource_initialization.is_some() {
+                break;
+            }
+            let preceding: String = chunks[..index]
+                .iter()
+                .map(|chunk| chunk.converted.as_str())
+                .collect();
+            let reading = chunks[index].reading.clone();
+            let lctx = self.lctx_for(&base_ctx, &preceding);
+            chunks[index].converted = self.convert_chunk(&reading, &lctx);
+            chunks[index].resolved = true;
+            remaining -= 1;
+        }
+
+        let combined: String = chunks
+            .iter()
+            .map(|chunk| chunk.converted.as_str())
+            .collect();
+        let needs_more = chunks.iter().any(|chunk| !chunk.resolved);
 
         let reconverted = chunks.len() - plan.lead_count - plan.trail_count;
         self.chunks = chunks;
@@ -287,28 +330,7 @@ impl InputMethodEngine {
             plan.lead_count, plan.trail_count, reconverted
         );
 
-        (combined != full_reading).then_some(combined)
-    }
-
-    /// Build one freshly-converted chunk for `reading`, whose left context is
-    /// `base_ctx` plus everything converted so far (`combined`). A non-Japanese
-    /// reading (digits / symbols / alphabet) is passed through verbatim — never
-    /// sent to the model, which tends to drop digits mid-run; a Japanese
-    /// reading is converted with that left context. The reading is
-    /// group-homogeneous, so its first char decides. See [`is_japanese`].
-    fn convert_new_chunk(
-        &mut self,
-        reading: String,
-        base_ctx: &str,
-        combined: &str,
-    ) -> ComposingChunk {
-        let converted = if reading.chars().next().is_some_and(is_japanese) {
-            let lctx = self.lctx_for(base_ctx, combined);
-            self.convert_chunk(&reading, &lctx)
-        } else {
-            reading.clone()
-        };
-        ComposingChunk { reading, converted }
+        ((combined != full_reading).then_some(combined), needs_more)
     }
 
     /// Configured maximum chunk length in chars, clamped to at least 1.
@@ -344,7 +366,8 @@ impl InputMethodEngine {
     /// missing converter by yielding nothing, and each chunk falls back to its
     /// own reading.
     fn ensure_kanji_converter(&mut self) {
-        if self.converters.kanji.is_none()
+        if self.resource_initialization.is_none()
+            && self.converters.kanji.is_none()
             && let Err(e) = self.init_kanji_converter()
         {
             debug!("Failed to initialize kanji converter: {}", e);

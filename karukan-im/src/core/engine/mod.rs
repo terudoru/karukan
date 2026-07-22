@@ -543,12 +543,15 @@ impl InputMethodEngine {
             return EngineResult::not_consumed();
         }
 
-        self.live.text = self.chunked_auto_suggest().unwrap_or_default();
+        let (converted, needs_more) = self.chunked_auto_suggest_step();
+        self.live.text = converted.unwrap_or_default();
         let preedit = self.set_composing_state();
         self.metrics.process_key_ms = start.elapsed().as_millis() as u64;
-        EngineResult::consumed()
+        let mut result = EngineResult::consumed()
             .with_action(EngineAction::UpdatePreedit(preedit))
-            .with_action(EngineAction::UpdateAuxText(self.format_aux_composing()))
+            .with_action(EngineAction::UpdateAuxText(self.format_aux_composing()));
+        result.needs_live_refresh = needs_more;
+        result
     }
 
     /// Commit any pending input and return the text

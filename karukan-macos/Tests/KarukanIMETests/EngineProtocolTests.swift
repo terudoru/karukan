@@ -9,10 +9,11 @@ final class EngineProtocolTests: XCTestCase {
 
     func testDecodePreeditAction() throws {
         let json = """
-            {"consumed":true,"actions":[{"attributes":[{"end":1,"start":0,"style":"underline"}],"caret":1,"text":"か","type":"update_preedit"}],"conversion_ms":0,"process_key_ms":0}
+            {"consumed":true,"actions":[{"attributes":[{"end":1,"start":0,"style":"underline"}],"caret":1,"text":"か","type":"update_preedit"}],"needs_live_refresh":true,"conversion_ms":0,"process_key_ms":0}
             """
         let result = try decodeKeyResult(json)
         XCTAssertTrue(result.consumed)
+        XCTAssertEqual(result.needsLiveRefresh, true)
         guard case .updatePreedit(let text, let caret, let attributes) = result.actions[0] else {
             return XCTFail("expected update_preedit")
         }
