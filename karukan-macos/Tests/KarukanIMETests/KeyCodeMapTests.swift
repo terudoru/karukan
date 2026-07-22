@@ -210,6 +210,12 @@ final class DeferredLiveRefreshTests: XCTestCase {
         .hideCandidates,
     ]
 
+    func testLiveRefreshCadenceKeepsInitialAndLongTextLatencyBounded() {
+        XCTAssertEqual(liveRefreshDebounceMilliseconds, 150)
+        XCTAssertEqual(liveRefreshContinuationMilliseconds, 100)
+        XCTAssertLessThan(liveRefreshContinuationMilliseconds, liveRefreshDebounceMilliseconds)
+    }
+
     func testPrintableInputSchedulesRefresh() {
         let key = EngineKeyEvent(keysym: 0x61, modifiers: KeyModifiers())
         XCTAssertTrue(shouldScheduleDeferredLiveRefresh(after: composingActions, key: key))
@@ -233,6 +239,19 @@ final class DeferredLiveRefreshTests: XCTestCase {
         modifiers.control = true
         let key = EngineKeyEvent(keysym: 0x61, modifiers: modifiers)
         XCTAssertFalse(shouldScheduleDeferredLiveRefresh(after: composingActions, key: key))
+    }
+
+    func testUnconsumedKeyKeepsPendingLiveRefresh() {
+        let passedThrough = KeyResult(
+            consumed: false, actions: [], needsLiveRefresh: false,
+            conversionMs: 0, processKeyMs: 0)
+        XCTAssertFalse(shouldInvalidateDeferredLiveRefresh(after: passedThrough))
+
+        let consumed = KeyResult(
+            consumed: true, actions: [], needsLiveRefresh: false,
+            conversionMs: 0, processKeyMs: 0)
+        XCTAssertTrue(shouldInvalidateDeferredLiveRefresh(after: consumed))
+        XCTAssertTrue(shouldInvalidateDeferredLiveRefresh(after: nil))
     }
 
     func testIdenticalPreeditUpdateDoesNotRenderAgain() {

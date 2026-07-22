@@ -34,6 +34,13 @@ func shouldDeferSurroundingTextRefresh(hasPreedit: Bool, key: EngineKeyEvent) ->
     return key.keysym < 0xff00 || (0x0100_0100...0x0110_ffff).contains(key.keysym)
 }
 
+/// A key the engine passes through must not cancel an already-scheduled live
+/// conversion. Otherwise an unrelated function key can leave the current
+/// composition permanently unconverted until the user edits it again.
+func shouldInvalidateDeferredLiveRefresh(after result: KeyResult?) -> Bool {
+    result?.consumed != false
+}
+
 struct PreeditSnapshot: Equatable {
     let text: String
     let caret: Int
@@ -65,7 +72,11 @@ func usableCandidateCursorRect(_ rect: NSRect) -> NSRect? {
     rect == .zero ? nil : rect
 }
 
-let liveRefreshDebounceMilliseconds = 250
+// Keep neural work out of the key callback, but do not make the first
+// conversion feel a quarter-second behind the user's typing. This matches the
+// already-calm continuation cadence while preserving a useful idle debounce.
+let liveRefreshDebounceMilliseconds = 150
+let liveRefreshContinuationMilliseconds = 100
 
 /// Thin InputMethodKit adapter for the karukan engine.
 ///
@@ -144,12 +155,15 @@ class KarukanInputController: IMKInputController {
         }
 
         guard let key = KeyCodeMap.translate(event: event) else { return false }
-        invalidateLiveRefresh()
 
         let refreshSurroundingTextAfterKey = shouldDeferSurroundingTextRefresh(
             hasPreedit: hasPreedit, key: key)
 
-        guard let result = engineClient.processKeySync(key) else {
+        let result = engineClient.processKeySync(key)
+        if shouldInvalidateDeferredLiveRefresh(after: result) {
+            invalidateLiveRefresh()
+        }
+        guard let result else {
             // Engine busy or dead: let the key pass through rather than
             // freezing input.
             return false
@@ -302,9 +316,12 @@ class KarukanInputController: IMKInputController {
                     self.requestLiveRefresh(generation: generation)
                 }
                 self.pendingLiveRefresh = continuation
-                // Yield long enough for newly typed keys to enter the server
-                // and for each one-way clause update to remain visually calm.
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(150), execute: continuation)
+                // Each refresh is bounded to one short chunk, so 100 ms still
+                // leaves keys ample time to enter the server while avoiding a
+                // multi-second conversion wave on punctuation-free text.
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + .milliseconds(liveRefreshContinuationMilliseconds),
+                    execute: continuation)
             }
         }
     }
