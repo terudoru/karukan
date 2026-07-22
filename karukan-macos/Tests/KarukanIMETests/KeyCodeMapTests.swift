@@ -127,6 +127,38 @@ final class Utf16ConversionTests: XCTestCase {
     }
 }
 
+final class DeferredLiveRefreshTests: XCTestCase {
+    private let composingActions: [EngineAction] = [
+        .updatePreedit(text: "あ", caret: 1, attributes: []),
+        .hideCandidates,
+    ]
+
+    func testPrintableInputSchedulesRefresh() {
+        let key = EngineKeyEvent(keysym: 0x61, modifiers: KeyModifiers())
+        XCTAssertTrue(shouldScheduleDeferredLiveRefresh(after: composingActions, key: key))
+    }
+
+    func testBackspaceSchedulesRefreshButEscapeDoesNot() {
+        XCTAssertTrue(
+            shouldScheduleDeferredLiveRefresh(
+                after: composingActions,
+                key: EngineKeyEvent(keysym: 0xff08, modifiers: KeyModifiers())
+            ))
+        XCTAssertFalse(
+            shouldScheduleDeferredLiveRefresh(
+                after: composingActions,
+                key: EngineKeyEvent(keysym: 0xff1b, modifiers: KeyModifiers())
+            ))
+    }
+
+    func testControlShortcutDoesNotScheduleRefresh() {
+        var modifiers = KeyModifiers()
+        modifiers.control = true
+        let key = EngineKeyEvent(keysym: 0x61, modifiers: modifiers)
+        XCTAssertFalse(shouldScheduleDeferredLiveRefresh(after: composingActions, key: key))
+    }
+}
+
 final class RightCommandTapDetectorTests: XCTestCase {
     private let rcmd = KeyCodeMap.rightCommandKeyCode
     private let lcmd: UInt16 = 55  // kVK_Command (left)

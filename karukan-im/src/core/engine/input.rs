@@ -11,7 +11,13 @@ impl InputMethodEngine {
                     || karukan_engine::contains_kana(&self.input_buf.text));
             if convert {
                 if self.live.enabled && self.mode.current() != InputMode::Katakana {
-                    if let Some(converted) = self.chunked_auto_suggest() {
+                    if self.defer_live_conversion {
+                        // The macOS frontend renders this rule-based preedit
+                        // immediately and asks for neural conversion after an
+                        // idle debounce. Keep the old chunks so that deferred
+                        // conversion can still reuse unchanged prefixes.
+                        self.live.text.clear();
+                    } else if let Some(converted) = self.chunked_auto_suggest() {
                         if converted == self.input_buf.text {
                             self.live.text.clear();
                         } else {

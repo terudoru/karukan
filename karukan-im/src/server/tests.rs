@@ -217,6 +217,28 @@ fn test_select_candidate_without_candidates_not_consumed() {
 }
 
 #[test]
+fn test_deferred_live_conversion_protocol_round_trip() {
+    let mut server = test_server();
+    // test_server disables live conversion; turn it back on without loading
+    // a model so this checks transport/state behavior only.
+    request(
+        &mut server,
+        json!({"jsonrpc":"2.0","id":30,"method":"process_key","params":{
+            "keysym": XKB_KEY_LOWER_L,
+            "modifiers": {"control": true, "shift": true}
+        }}),
+    );
+    press(&mut server, XKB_KEY_A);
+
+    let resp = request(
+        &mut server,
+        json!({"jsonrpc":"2.0","id":31,"method":"refresh_live_conversion","params":{}}),
+    );
+    assert_eq!(resp["result"]["consumed"], true);
+    assert!(!actions_of(&resp, "update_preedit").is_empty());
+}
+
+#[test]
 fn test_reset_clears_state() {
     let mut server = test_server();
     press(&mut server, XKB_KEY_K);

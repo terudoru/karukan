@@ -14,7 +14,12 @@ class EngineClient {
     private let requestQueue = DispatchQueue(label: "dev.togatoga.karukan.jsonrpc.request")
 
     private let lock = NSLock()
-    private var pendingRequests: [Int: (Data?) -> Void] = [:]
+    private struct PendingRequest {
+        let readerGeneration: Int
+        let completion: (Data?) -> Void
+    }
+    private var readerGeneration = 0
+    private var pendingRequests: [Int: PendingRequest] = [:]
 
     /// `autoInit` re-sends `init` whenever the server (re)starts. Tests
     /// disable it to avoid loading models.
@@ -75,7 +80,26 @@ class EngineClient {
             "modifiers": key.modifiers.jsonObject,
             "is_release": false,
         ]
-        return keyResultSync(method: "process_key", params: params, timeout: 3.0)
+        // Normal key processing is rule-based and deferred live inference is
+        // lightweight. 1.5 seconds still covers observed cached model
+        // initialization while halving the former three-second freeze window
+        // for a wedged child.
+        return keyResultSync(method: "process_key", params: params, timeout: 1.5)
+    }
+
+    func refreshLiveConversionAsync(completion: @escaping (KeyResult?) -> Void) {
+        sendRequest(method: "refresh_live_conversion", params: [:]) { data in
+            guard let data else {
+                completion(nil)
+                return
+            }
+            do {
+                completion(try makeProtocolDecoder().decode(KeyResult.self, from: data))
+            } catch {
+                NSLog("KarukanIME: failed to decode refresh_live_conversion result: \(error)")
+                completion(nil)
+            }
+        }
     }
 
     func commitSync() -> KeyResult? {
@@ -96,6 +120,27 @@ class EngineClient {
 
     func resetAsync() {
         sendRequest(method: "reset", params: [:]) { _ in }
+    }
+
+    /// Pipes usually survive sleep. Probe the existing child first so a
+    /// normal wake does not reload both models and stall the first key for
+    /// roughly half a second. Replace the child only when the round trip
+    /// actually fails.
+    func verifyConnectionAfterWake() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let healthy = self.sendRequestSync(
+                method: "status",
+                params: [:],
+                timeout: 0.25,
+                recoverOnTimeout: false
+            ) != nil
+            if !healthy {
+                DispatchQueue.main.async { [weak self] in
+                    self?.serverProcess.restart()
+                }
+            }
+        }
     }
 
     func setSurroundingTextAsync(text: String, cursorPos: Int) {
@@ -123,8 +168,13 @@ class EngineClient {
 
     func startReaderLoop() {
         guard let stdout = serverProcess.stdoutPipe else { return }
+        lock.lock()
+        readerGeneration &+= 1
+        let generation = readerGeneration
+        lock.unlock()
 
-        let queue = DispatchQueue(label: "dev.togatoga.karukan.jsonrpc.reader")
+        let queue = DispatchQueue(
+            label: "dev.togatoga.karukan.jsonrpc.reader.\(generation)")
         queue.async { [weak self] in
             let handle = stdout.fileHandleForReading
             var buffer = Data()
@@ -133,7 +183,7 @@ class EngineClient {
                 let chunk = handle.availableData
                 if chunk.isEmpty {
                     // EOF: server terminated
-                    self?.failAllPending()
+                    self?.failPending(readerGeneration: generation)
                     break
                 }
                 buffer.append(chunk)
@@ -152,10 +202,17 @@ class EngineClient {
     func sendRequest(
         method: String, params: [String: Any], completion: @escaping (Data?) -> Void
     ) -> Int {
+        // Bind the request to the current pipe/generation now. Looking up the
+        // pipe later on requestQueue could accidentally send an old request
+        // into a replacement process after a restart.
+        let stdin = serverProcess.stdinPipe
         lock.lock()
         let id = nextID
         nextID += 1
-        pendingRequests[id] = completion
+        pendingRequests[id] = PendingRequest(
+            readerGeneration: readerGeneration,
+            completion: completion
+        )
         lock.unlock()
 
         let request: [String: Any] = [
@@ -167,7 +224,7 @@ class EngineClient {
 
         requestQueue.async { [weak self] in
             guard let self,
-                let stdin = self.serverProcess.stdinPipe,
+                let stdin,
                 var data = try? JSONSerialization.data(withJSONObject: request)
             else {
                 self?.takePending(id: id)?(nil)
@@ -184,7 +241,12 @@ class EngineClient {
         return id
     }
 
-    func sendRequestSync(method: String, params: [String: Any], timeout: TimeInterval) -> Data? {
+    func sendRequestSync(
+        method: String,
+        params: [String: Any],
+        timeout: TimeInterval,
+        recoverOnTimeout: Bool = true
+    ) -> Data? {
         let semaphore = DispatchSemaphore(value: 0)
         var result: Data?
         let id = sendRequest(method: method, params: params) { data in
@@ -194,7 +256,9 @@ class EngineClient {
         if semaphore.wait(timeout: .now() + timeout) == .timedOut {
             NSLog("KarukanIME: \(method) timed out after \(timeout)s")
             takePending(id: id)?(nil)
-            timeoutRecovery()
+            if recoverOnTimeout {
+                timeoutRecovery()
+            }
             return nil
         }
         return result
@@ -229,16 +293,18 @@ class EngineClient {
     private func takePending(id: Int) -> ((Data?) -> Void)? {
         lock.lock()
         defer { lock.unlock() }
-        return pendingRequests.removeValue(forKey: id)
+        return pendingRequests.removeValue(forKey: id)?.completion
     }
 
-    private func failAllPending() {
+    private func failPending(readerGeneration: Int) {
         lock.lock()
-        let pending = pendingRequests
-        pendingRequests.removeAll()
+        let matching = pendingRequests.filter { $0.value.readerGeneration == readerGeneration }
+        for id in matching.keys {
+            pendingRequests.removeValue(forKey: id)
+        }
         lock.unlock()
-        for (_, completion) in pending {
-            completion(nil)
+        for request in matching.values {
+            request.completion(nil)
         }
     }
 }

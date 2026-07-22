@@ -12,6 +12,10 @@ pub struct ConversionSegment {
     pub reading: String,
     /// Candidate list for this segment.
     pub candidates: CandidateList,
+    /// True when this inactive clause currently has only dictionary/history/
+    /// fallback candidates. Model candidates are generated when the user
+    /// focuses the clause, avoiding N sequential inferences on Space.
+    pub needs_expansion: bool,
 }
 
 /// The current state of the IME

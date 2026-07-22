@@ -73,6 +73,18 @@ final class TransportTests: XCTestCase {
         }
     }
 
+    func testWakeProbeKeepsHealthyProcess() throws {
+        let unexpectedRestart = expectation(description: "healthy child must not restart")
+        unexpectedRestart.isInverted = true
+        process.onWillRestart = {
+            unexpectedRestart.fulfill()
+        }
+
+        client.verifyConnectionAfterWake()
+        wait(for: [unexpectedRestart], timeout: 0.4)
+        XCTAssertNotNil(client.sendRequestSync(method: "status", params: [:], timeout: 1.0))
+    }
+
     func testSynchronousTimeoutTriggersRecovery() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "karukan-silent-server-\(UUID().uuidString)", isDirectory: true)

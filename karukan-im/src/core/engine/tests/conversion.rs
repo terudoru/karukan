@@ -146,6 +146,8 @@ fn test_conversion_can_select_candidates_per_segment() {
         panic!("expected conversion state");
     };
     assert_eq!(*active_segment, 0);
+    assert!(!segments[0].needs_expansion);
+    assert!(segments[1..].iter().all(|segment| segment.needs_expansion));
     assert_eq!(segments.len(), 2);
     assert_eq!(segments[0].reading, "あい");
     assert_eq!(segments[1].reading, "うえ");
@@ -186,6 +188,7 @@ fn test_conversion_can_select_candidates_per_segment() {
         panic!("expected conversion state");
     };
     assert_eq!(*active_segment, 1);
+    assert!(!segments[1].needs_expansion);
     assert_eq!(segments.len(), 2);
     assert_eq!(segments[0].reading, "あい");
     assert_eq!(segments[1].reading, "うえ");
@@ -457,6 +460,7 @@ fn commit_and_continue_advances_surrounding_context() {
     let segments = vec![ConversionSegment {
         reading: "あい".to_string(),
         candidates: candidates.clone(),
+        needs_expansion: false,
     }];
     engine.state = InputState::Conversion {
         preedit: Preedit::with_text("愛"),

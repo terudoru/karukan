@@ -89,7 +89,11 @@ impl ImServer {
                 let params: ProcessKeyParams = parse_params(params)?;
                 let event =
                     KeyEvent::new(Keysym(params.keysym), params.modifiers, !params.is_release);
-                let result = self.engine.process_key(&event);
+                let result = self.engine.process_key_deferred_live(&event);
+                self.key_result(result)
+            }
+            "refresh_live_conversion" => {
+                let result = self.engine.refresh_live_conversion();
                 self.key_result(result)
             }
             "select_candidate" => {

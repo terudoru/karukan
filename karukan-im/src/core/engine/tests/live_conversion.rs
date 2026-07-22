@@ -27,6 +27,46 @@ fn test_live_conversion_enabled() {
 }
 
 #[test]
+fn deferred_live_conversion_returns_kana_before_refresh() {
+    let mut engine = make_live_conversion_engine();
+    engine.dicts.user = Some(user_dict_with("あい", "愛"));
+
+    engine.process_key_deferred_live(&press('a'));
+    let immediate = engine.process_key_deferred_live(&press('i'));
+    let immediate_text = immediate.actions.iter().find_map(|action| {
+        if let EngineAction::UpdatePreedit(preedit) = action {
+            Some(preedit.text())
+        } else {
+            None
+        }
+    });
+    assert_eq!(immediate_text, Some("あい"));
+    assert!(engine.live.text.is_empty());
+
+    let refreshed = engine.refresh_live_conversion();
+    let refreshed_text = refreshed.actions.iter().find_map(|action| {
+        if let EngineAction::UpdatePreedit(preedit) = action {
+            Some(preedit.text())
+        } else {
+            None
+        }
+    });
+    assert_eq!(refreshed_text, Some("愛"));
+    assert_eq!(engine.live.text, "愛");
+}
+
+#[test]
+fn deferred_live_refresh_is_inert_after_composition_ends() {
+    let mut engine = make_live_conversion_engine();
+    engine.process_key_deferred_live(&press('a'));
+    engine.process_key(&press_key(Keysym::RETURN));
+
+    let result = engine.refresh_live_conversion();
+    assert!(!result.consumed);
+    assert!(result.actions.is_empty());
+}
+
+#[test]
 fn test_live_conversion_off_unchanged() {
     // With live_conversion=false, composing remains plain hiragana and must
     // not initialize a neural model whose output would be discarded.

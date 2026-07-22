@@ -37,6 +37,15 @@ private func setupLogging() {
     try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
 
     let logFile = logDir.appendingPathComponent("karukan-ime.log")
+    let archivedLog = logDir.appendingPathComponent("karukan-ime.log.old")
+    let maxLogBytes: UInt64 = 2 * 1024 * 1024
+    if let attributes = try? FileManager.default.attributesOfItem(atPath: logFile.path),
+        let size = attributes[.size] as? NSNumber,
+        size.uint64Value >= maxLogBytes
+    {
+        try? FileManager.default.removeItem(at: archivedLog)
+        try? FileManager.default.moveItem(at: logFile, to: archivedLog)
+    }
     if !FileManager.default.fileExists(atPath: logFile.path) {
         FileManager.default.createFile(atPath: logFile.path, contents: nil)
     }
@@ -89,8 +98,8 @@ NSWorkspace.shared.notificationCenter.addObserver(
     object: nil,
     queue: .main
 ) { _ in
-    NSLog("KarukanIME: wake from sleep — restarting karukan-imserver")
-    engineProcess.restart()
+    NSLog("KarukanIME: wake from sleep — verifying karukan-imserver")
+    engineClient.verifyConnectionAfterWake()
 }
 
 NSApplication.shared.run()

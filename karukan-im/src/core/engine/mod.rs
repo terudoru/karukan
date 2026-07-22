@@ -144,6 +144,10 @@ pub struct InputMethodEngine {
     learning: Option<LearningCache>,
     /// Result channel for the non-blocking system dictionary update check.
     dictionary_update: Option<Receiver<Result<BackgroundDictionaryUpdate, String>>>,
+    /// The macOS stdio frontend asks key handling to return the rule-based
+    /// preedit immediately, then requests live conversion after a short idle
+    /// debounce. Linux/fcitx5 keeps the existing synchronous path.
+    defer_live_conversion: bool,
 }
 
 impl InputMethodEngine {
@@ -167,6 +171,7 @@ impl InputMethodEngine {
             dicts: Dictionaries::default(),
             learning: None,
             dictionary_update: None,
+            defer_live_conversion: false,
         }
     }
 
@@ -483,6 +488,42 @@ impl InputMethodEngine {
         self.metrics.process_key_ms = start.elapsed().as_millis() as u64;
 
         result
+    }
+
+    /// Process one key without running neural live conversion inline.
+    ///
+    /// InputMethodKit must synchronously decide whether a key was consumed;
+    /// keeping inference out of that callback makes marked text update at
+    /// romaji-conversion speed. [`Self::refresh_live_conversion`] performs the
+    /// deferred inference after the frontend's idle debounce.
+    pub fn process_key_deferred_live(&mut self, key: &KeyEvent) -> EngineResult {
+        self.defer_live_conversion = true;
+        let result = self.process_key(key);
+        self.defer_live_conversion = false;
+        result
+    }
+
+    /// Refresh the current composing preedit with a live-conversion result.
+    /// Returns no actions when composition has ended or live conversion is off.
+    pub fn refresh_live_conversion(&mut self) -> EngineResult {
+        let start = std::time::Instant::now();
+        self.metrics.conversion_ms = 0;
+
+        let can_refresh = matches!(self.state, InputState::Composing { .. })
+            && self.live.enabled
+            && self.mode.current() != InputMode::Katakana
+            && !self.input_buf.text.is_empty();
+        if !can_refresh {
+            self.metrics.process_key_ms = start.elapsed().as_millis() as u64;
+            return EngineResult::not_consumed();
+        }
+
+        self.live.text = self.chunked_auto_suggest().unwrap_or_default();
+        let preedit = self.set_composing_state();
+        self.metrics.process_key_ms = start.elapsed().as_millis() as u64;
+        EngineResult::consumed()
+            .with_action(EngineAction::UpdatePreedit(preedit))
+            .with_action(EngineAction::UpdateAuxText(self.format_aux_composing()))
     }
 
     /// Commit any pending input and return the text

@@ -27,6 +27,13 @@ final class CandidateRowView: NSView {
         return self
     }
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        // Input-method panels belong to an inactive helper application. The
+        // default NSView implementation returns false, which would discard
+        // the first click instead of forming the intended double-click.
+        true
+    }
+
     override func mouseDown(with event: NSEvent) {
         handleClick(count: event.clickCount)
     }

@@ -645,6 +645,57 @@ impl InputMethodEngine {
         Self::annotated_to_candidate_list(candidates, reading)
     }
 
+    /// Build candidates for an inactive clause without model inference.
+    /// The selected surface is kept at the top so the full preedit remains
+    /// stable until the clause is focused and expanded.
+    fn candidate_list_for_deferred_segment(
+        &mut self,
+        reading: &str,
+        preferred_text: Option<&str>,
+        skip_learning: bool,
+    ) -> CandidateList {
+        let mut candidates = self.build_conversion_candidates(reading, 0, skip_learning);
+        if let Some(preferred_text) = preferred_text
+            && !preferred_text.is_empty()
+        {
+            if let Some(index) = candidates.iter().position(|c| c.text == preferred_text) {
+                let preferred = candidates.remove(index);
+                candidates.insert(0, preferred);
+            } else if preferred_text != reading {
+                candidates.insert(
+                    0,
+                    AnnotatedCandidate::new(preferred_text, CandidateSource::Model),
+                );
+            }
+        }
+        Self::annotated_to_candidate_list(candidates, reading)
+    }
+
+    fn expand_deferred_segment(
+        &mut self,
+        segments: &mut [ConversionSegment],
+        index: usize,
+        skip_learning: bool,
+    ) {
+        let Some(segment) = segments.get(index) else {
+            return;
+        };
+        if !segment.needs_expansion {
+            return;
+        }
+        let reading = segment.reading.clone();
+        let preferred = segment.candidates.selected_text().map(str::to_string);
+        let candidates = self.candidate_list_for_conversion_segment(
+            &reading,
+            preferred.as_deref(),
+            skip_learning,
+        );
+        if let Some(segment) = segments.get_mut(index) {
+            segment.candidates = candidates;
+            segment.needs_expansion = false;
+        }
+    }
+
     fn longest_user_dict_prefix(&self, input: &str) -> Option<(String, String)> {
         let dict = self.dicts.user.as_ref()?;
         dict.common_prefix_search(input)
@@ -910,6 +961,7 @@ impl InputMethodEngine {
             .then_some(ConversionSegment {
                 reading: reading.to_string(),
                 candidates,
+                needs_expansion: false,
             })
             .into_iter()
             .collect()
@@ -940,20 +992,31 @@ impl InputMethodEngine {
             .into_iter()
             .enumerate()
             .filter_map(|(idx, span)| {
-                let preferred = span.fixed_surface.as_deref().or_else(|| {
+                let preferred = span.fixed_surface.clone().or_else(|| {
                     current_surfaces
                         .as_ref()
                         .and_then(|surfaces| surfaces.get(idx))
                         .and_then(|surface| surface.as_deref())
+                        .map(str::to_string)
                 });
-                let candidates = self.candidate_list_for_conversion_segment(
-                    &span.reading,
-                    preferred,
-                    skip_learning,
-                );
+                let needs_expansion = idx != 0;
+                let candidates = if needs_expansion {
+                    self.candidate_list_for_deferred_segment(
+                        &span.reading,
+                        preferred.as_deref(),
+                        skip_learning,
+                    )
+                } else {
+                    self.candidate_list_for_conversion_segment(
+                        &span.reading,
+                        preferred.as_deref(),
+                        skip_learning,
+                    )
+                };
                 (!candidates.is_empty()).then_some(ConversionSegment {
                     reading: span.reading,
                     candidates,
+                    needs_expansion,
                 })
             })
             .collect()
@@ -1023,18 +1086,22 @@ impl InputMethodEngine {
         num_candidates: usize,
         skip_learning: bool,
     ) -> Vec<AnnotatedCandidate> {
-        // Try to initialize the kanji converter, but don't bail out if it
-        // fails — symbol-only inputs (e.g. `。。。`) don't need the model and
-        // we still want to produce dictionary, rewriter, and fallback candidates.
-        // run_kana_kanji_conversion handles the converter-missing case.
-        if self.converters.kanji.is_none()
-            && let Err(e) = self.init_kanji_converter()
-        {
-            debug!("Failed to initialize kanji converter: {}", e);
-        }
-
-        let api_context = self.truncate_context_for_api();
-        let candidates = self.run_kana_kanji_conversion(reading, &api_context, num_candidates);
+        // `num_candidates == 0` builds a cheap placeholder list for inactive
+        // clauses. It intentionally skips model initialization and inference;
+        // the clause is expanded when focused.
+        let candidates = if num_candidates == 0 {
+            Vec::new()
+        } else {
+            // Try to initialize the converter, but don't bail out if it fails:
+            // symbol-only input can still use dictionaries and rewriters.
+            if self.converters.kanji.is_none()
+                && let Err(e) = self.init_kanji_converter()
+            {
+                debug!("Failed to initialize kanji converter: {}", e);
+            }
+            let api_context = self.truncate_context_for_api();
+            self.run_kana_kanji_conversion(reading, &api_context, num_candidates)
+        };
 
         let hiragana = reading.to_string();
         let katakana = karukan_engine::hiragana_to_katakana(reading);
@@ -1070,7 +1137,8 @@ impl InputMethodEngine {
             // after rewriters have run — otherwise `:smile` would be
             // pinned to the top of the candidate list as a Fallback
             // and outrank the 😄 we surface in step 5/6.
-            if builder.is_empty() && self.mode.current() != InputMode::Emoji {
+            if num_candidates != 0 && builder.is_empty() && self.mode.current() != InputMode::Emoji
+            {
                 builder.push(AnnotatedCandidate::new(
                     hiragana.clone(),
                     CandidateSource::Fallback,
@@ -1512,6 +1580,7 @@ impl InputMethodEngine {
                 return EngineResult::consumed();
             };
             segment.candidates = candidate_list.clone();
+            segment.needs_expansion = false;
             *candidates = candidate_list;
             let updated_preedit =
                 Self::build_conversion_preedit_from_segments(segments, *active_segment);
@@ -1572,6 +1641,7 @@ impl InputMethodEngine {
             op(candidates);
             if let Some(segment) = segments.get_mut(*active_segment) {
                 segment.candidates = candidates.clone();
+                segment.needs_expansion = false;
             }
             let new_preedit =
                 Self::build_conversion_preedit_from_segments(segments, *active_segment);
@@ -1606,70 +1676,49 @@ impl InputMethodEngine {
     }
 
     fn move_conversion_segment(&mut self, delta: isize) -> EngineResult {
-        if matches!(
-            &self.state,
-            InputState::Conversion { segments, .. } if segments.len() <= 1
-        ) {
+        let (mut segments, mut active_segment, skip_learning) = match &self.state {
+            InputState::Conversion {
+                segments,
+                active_segment,
+                skip_learning,
+                ..
+            } => (segments.clone(), *active_segment, *skip_learning),
+            _ => return EngineResult::not_consumed(),
+        };
+
+        if segments.len() <= 1 {
             let current_surface = self
                 .selected_conversion_info()
                 .map(|(text, _)| text)
                 .unwrap_or_default();
             let reading = self.input_buf.text.clone();
-            let skip_learning = match &self.state {
-                InputState::Conversion { skip_learning, .. } => *skip_learning,
-                _ => false,
-            };
-            let new_segments =
-                self.build_navigation_segments(&reading, &current_surface, skip_learning);
-            if new_segments.len() > 1 {
-                let len = new_segments.len() as isize;
-                let active_segment = if delta >= 0 {
-                    1.min(new_segments.len() - 1)
+            let rebuilt = self.build_navigation_segments(&reading, &current_surface, skip_learning);
+            if rebuilt.len() > 1 {
+                let len = rebuilt.len() as isize;
+                active_segment = if delta >= 0 {
+                    1.min(rebuilt.len() - 1)
                 } else {
                     (len - 1) as usize
                 };
-                let candidates = new_segments[active_segment].candidates.clone();
-                let preedit =
-                    Self::build_conversion_preedit_from_segments(&new_segments, active_segment);
-                let reading = new_segments[active_segment].reading.clone();
-                self.state = InputState::Conversion {
-                    preedit: preedit.clone(),
-                    candidates: candidates.clone(),
-                    segments: new_segments,
-                    active_segment,
-                    skip_learning,
-                };
-                return self.conversion_update_result(preedit, candidates, &reading);
-            }
-        }
-
-        let (preedit, candidates, reading) = {
-            let InputState::Conversion {
-                preedit,
-                candidates,
-                segments,
-                active_segment,
-                ..
-            } = &mut self.state
-            else {
-                return EngineResult::not_consumed();
-            };
-
-            if segments.len() <= 1 {
+                segments = rebuilt;
+            } else {
                 return EngineResult::consumed();
             }
-
+        } else {
             let len = segments.len() as isize;
-            let next = (*active_segment as isize + delta).rem_euclid(len) as usize;
-            *active_segment = next;
-            *candidates = segments[next].candidates.clone();
-            let new_preedit = Self::build_conversion_preedit_from_segments(segments, next);
-            *preedit = new_preedit.clone();
-            (
-                new_preedit,
-                candidates.clone(),
-                segments[next].reading.clone(),
-            )
+            active_segment = (active_segment as isize + delta).rem_euclid(len) as usize;
+        }
+
+        self.expand_deferred_segment(&mut segments, active_segment, skip_learning);
+        let candidates = segments[active_segment].candidates.clone();
+        let reading = segments[active_segment].reading.clone();
+        let preedit = Self::build_conversion_preedit_from_segments(&segments, active_segment);
+        self.state = InputState::Conversion {
+            preedit: preedit.clone(),
+            candidates: candidates.clone(),
+            segments,
+            active_segment,
+            skip_learning,
         };
         self.conversion_update_result(preedit, candidates, &reading)
     }
@@ -1720,13 +1769,15 @@ impl InputMethodEngine {
             let active_reading = segments[active_segment].reading.clone();
             segments[active_segment].candidates =
                 self.candidate_list_for_conversion_segment(&active_reading, None, skip_learning);
+            segments[active_segment].needs_expansion = false;
 
             if next_reading.is_empty() {
                 segments.remove(active_segment + 1);
             } else {
                 segments[active_segment + 1].reading = next_reading.clone();
                 segments[active_segment + 1].candidates =
-                    self.candidate_list_for_conversion_segment(&next_reading, None, skip_learning);
+                    self.candidate_list_for_deferred_segment(&next_reading, None, skip_learning);
+                segments[active_segment + 1].needs_expansion = true;
             }
         } else {
             let mut active_chars: Vec<char> = segments[active_segment].reading.chars().collect();
@@ -1738,19 +1789,22 @@ impl InputMethodEngine {
             segments[active_segment].reading = active_reading.clone();
             segments[active_segment].candidates =
                 self.candidate_list_for_conversion_segment(&active_reading, None, skip_learning);
+            segments[active_segment].needs_expansion = false;
 
             if let Some(next_segment) = segments.get_mut(active_segment + 1) {
                 let next_reading = format!("{moved}{}", next_segment.reading);
                 next_segment.reading = next_reading.clone();
                 next_segment.candidates =
-                    self.candidate_list_for_conversion_segment(&next_reading, None, skip_learning);
+                    self.candidate_list_for_deferred_segment(&next_reading, None, skip_learning);
+                next_segment.needs_expansion = true;
             } else {
                 let next_reading = moved.to_string();
                 let candidates =
-                    self.candidate_list_for_conversion_segment(&next_reading, None, skip_learning);
+                    self.candidate_list_for_deferred_segment(&next_reading, None, skip_learning);
                 segments.push(ConversionSegment {
                     reading: next_reading,
                     candidates,
+                    needs_expansion: true,
                 });
             }
         }

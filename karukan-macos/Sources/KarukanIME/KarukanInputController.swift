@@ -8,6 +8,25 @@ func visiblePreeditCommitText(_ text: String) -> String {
     text.replacingOccurrences(of: "\u{200B}", with: "")
 }
 
+func shouldScheduleDeferredLiveRefresh(
+    after actions: [EngineAction], key: EngineKeyEvent
+) -> Bool {
+    let modifiers = key.modifiers
+    let editsText = key.keysym < 0xff00 || key.keysym == 0xff08 || key.keysym == 0xffff
+    guard editsText, !modifiers.control, !modifiers.alt, !modifiers.superKey else {
+        return false
+    }
+    let hasComposingPreedit = actions.contains {
+        if case .updatePreedit(let text, _, _) = $0 { return !text.isEmpty }
+        return false
+    }
+    let isComposingUpdate = actions.contains {
+        if case .hideCandidates = $0 { return true }
+        return false
+    }
+    return hasComposingPreedit && isComposingUpdate
+}
+
 /// Thin InputMethodKit adapter for the karukan engine.
 ///
 /// All IME state (Empty → Composing → Conversion, romaji conversion,
@@ -24,6 +43,8 @@ class KarukanInputController: IMKInputController {
     private var hasPreedit = false
     private var displayedPreedit = ""
     private weak var activeClientObject: AnyObject?
+    private var liveRefreshGeneration = 0
+    private var pendingLiveRefresh: DispatchWorkItem?
 
     /// Detects the lone right-⌘ tap that returns to hiragana mode on
     /// keyboards without a JIS かな key (issue #33).
@@ -82,6 +103,7 @@ class KarukanInputController: IMKInputController {
         }
 
         guard let key = KeyCodeMap.translate(event: event) else { return false }
+        invalidateLiveRefresh()
 
         // Refresh the conversion context while no composition is active
         // (mirrors the fcitx5 addon, which captures surrounding text in the
@@ -100,6 +122,9 @@ class KarukanInputController: IMKInputController {
             return false
         }
         apply(actions: result.actions, client: client)
+        if result.consumed && shouldScheduleDeferredLiveRefresh(after: result.actions, key: key) {
+            scheduleLiveRefresh()
+        }
         return result.consumed
     }
 
@@ -185,12 +210,41 @@ class KarukanInputController: IMKInputController {
     }
 
     private func clearCompositionTracking() {
+        invalidateLiveRefresh()
         hasPreedit = false
         displayedPreedit = ""
         activeClientObject = nil
         if Self.activeController === self {
             Self.activeController = nil
         }
+    }
+
+    private func invalidateLiveRefresh() {
+        pendingLiveRefresh?.cancel()
+        pendingLiveRefresh = nil
+        liveRefreshGeneration &+= 1
+    }
+
+    /// Neural live conversion is deliberately delayed until input has been
+    /// idle for a moment. Rule-based romaji/kana preedit is already visible,
+    /// so inference never sits directly in InputMethodKit's key callback.
+    private func scheduleLiveRefresh() {
+        let generation = liveRefreshGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.liveRefreshGeneration == generation else { return }
+            engineClient.refreshLiveConversionAsync { [weak self] result in
+                DispatchQueue.main.async {
+                    guard let self,
+                        self.liveRefreshGeneration == generation,
+                        let result,
+                        let client = self.activeClientObject as? (any IMKTextInput)
+                    else { return }
+                    self.apply(actions: result.actions, client: client)
+                }
+            }
+        }
+        pendingLiveRefresh = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100), execute: work)
     }
 
     private func selectCandidateFromWindow(pageIndex: Int) {

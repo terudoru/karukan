@@ -41,12 +41,13 @@ fn strategy_no_light_model_returns_main_model_only() {
 // --- Auto-suggest (num_candidates == 1) ---
 
 #[test]
-fn strategy_auto_suggest_adaptive_false_returns_main_model() {
+fn strategy_auto_suggest_uses_light_model_for_low_latency() {
     let config = default_strategy_config();
-    // adaptive=false → MainModelOnly
+    // Live suggestions use the resident light model even before a slow main
+    // conversion has tripped the adaptive flag.
     assert_eq!(
         determine_conversion_strategy(5, 1, true, false, &config),
-        ConversionStrategy::MainModelOnly,
+        ConversionStrategy::LightModelOnly,
     );
 }
 

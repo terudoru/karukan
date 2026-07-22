@@ -10,6 +10,7 @@ final class CandidateWindowTests: XCTestCase {
         XCTAssertEqual(candidateIndexForDoubleClick(clickCount: 3, pageIndex: 3), 3)
 
         let row = CandidateRowView(pageIndex: 3)
+        XCTAssertTrue(row.acceptsFirstMouse(for: nil))
         var selectedIndex: Int?
         row.onDoubleClick = { selectedIndex = $0 }
         row.handleClick(count: 1)

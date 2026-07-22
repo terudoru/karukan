@@ -59,12 +59,11 @@ fn determine_adaptive_strategy(
     }
 
     if num_candidates == 1 {
-        // Auto-suggest: adapt based on measured latency
-        if adaptive_use_light_model {
-            ConversionStrategy::LightModelOnly
-        } else {
-            ConversionStrategy::MainModelOnly
-        }
+        // Live suggestions are latency-sensitive and are replaced by the
+        // explicit main/beam candidates on Space. Prefer the resident light
+        // model whenever available so an idle refresh cannot hold up a key
+        // queued immediately behind it.
+        ConversionStrategy::LightModelOnly
     } else {
         // Explicit conversion (Space key)
         if adaptive_use_light_model {

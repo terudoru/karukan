@@ -10,6 +10,7 @@
 //! |------------------------|------------------------------------------|-------------------|
 //! | `init`                 | `{}`                                     | [`InitResult`]    |
 //! | `process_key`          | [`ProcessKeyParams`]                     | [`KeyResult`]     |
+//! | `refresh_live_conversion` | `{}`                                  | [`KeyResult`]     |
 //! | `select_candidate`     | [`SelectCandidateParams`]                | [`KeyResult`]     |
 //! | `commit`               | `{}`                                     | [`KeyResult`]     |
 //! | `reset`                | `{}`                                     | `{}`              |
@@ -130,7 +131,8 @@ pub struct InitResult {
     pub model_name: String,
 }
 
-/// Result of `process_key`, `select_candidate`, and `commit`.
+/// Result of key processing, deferred live conversion, candidate selection,
+/// and commit.
 #[derive(Debug, Serialize)]
 pub struct KeyResult {
     pub consumed: bool,
