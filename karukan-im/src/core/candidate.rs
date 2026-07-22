@@ -114,8 +114,8 @@ pub struct CandidateList {
 }
 
 impl CandidateList {
-    /// Default page size for candidate display
-    pub const DEFAULT_PAGE_SIZE: usize = 9;
+    /// macOS' Japanese candidate window advances eight rows at a time.
+    pub const DEFAULT_PAGE_SIZE: usize = 8;
 
     /// Create a new candidate list
     pub fn new(candidates: Vec<Candidate>) -> Self {
@@ -274,7 +274,7 @@ impl CandidateList {
         }
     }
 
-    /// Select a candidate by index within the current page (1-9)
+    /// Select a candidate by index within the current page (1-8)
     pub fn select_on_page(&mut self, page_index: usize) -> Option<&Candidate> {
         if page_index == 0 || page_index > self.page_size {
             return None;
@@ -339,21 +339,21 @@ mod tests {
 
     #[test]
     fn test_candidate_list_pagination() {
-        // Default page_size is 9, so 20 items = 3 pages (9+9+2)
+        // macOS advances 8 rows at a time, so 20 items = 3 pages (8+8+4)
         let items: Vec<_> = (1..=20).map(|i| format!("item{}", i)).collect();
         let mut candidates = CandidateList::from_strings(items);
 
         assert_eq!(candidates.total_pages(), 3);
         assert_eq!(candidates.current_page(), 0);
-        assert_eq!(candidates.page_candidates().len(), 9);
+        assert_eq!(candidates.page_candidates().len(), 8);
 
         candidates.next_page();
         assert_eq!(candidates.current_page(), 1);
-        assert_eq!(candidates.page_start(), 9);
+        assert_eq!(candidates.page_start(), 8);
 
         candidates.next_page();
         assert_eq!(candidates.current_page(), 2);
-        assert_eq!(candidates.page_candidates().len(), 2);
+        assert_eq!(candidates.page_candidates().len(), 4);
 
         // Wrap to first page
         candidates.next_page();
@@ -372,6 +372,9 @@ mod tests {
         // Move to second page and select item 2
         candidates.next_page();
         candidates.select_on_page(2);
-        assert_eq!(candidates.selected_text(), Some("item11")); // 9 + 2 = 11
+        assert_eq!(candidates.selected_text(), Some("item10")); // 8 + 2 = 10
+
+        // The ninth digit is not part of an eight-row macOS page.
+        assert!(candidates.select_on_page(9).is_none());
     }
 }

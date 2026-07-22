@@ -4,6 +4,24 @@ import XCTest
 @testable import KarukanIME
 
 final class CandidateWindowTests: XCTestCase {
+    func testCandidateRowTracksSelectionWithoutAStoredColor() {
+        let row = CandidateRowView(pageIndex: 0)
+        row.isSelected = true
+
+        XCTAssertTrue(row.isSelected)
+        XCTAssertNil(row.layer?.backgroundColor)
+    }
+
+    func testCandidateAuxHidesDiagnosticsButKeepsActionableHint() {
+        XCTAssertNil(userFacingCandidateAux("[変換] きょう | 12ms/13ms 4tok | model"))
+        XCTAssertEqual(
+            userFacingCandidateAux(
+                "[変換] きょう | 12ms/13ms 4tok | model | 📝 学習 "
+                    + "(Ctrl+Shift+Deleteで履歴から削除)"),
+            "Ctrl+Shift+Deleteで履歴から削除"
+        )
+    }
+
     func testOnlyDoubleClickSelectsCandidate() {
         XCTAssertNil(candidateIndexForDoubleClick(clickCount: 1, pageIndex: 3))
         XCTAssertEqual(candidateIndexForDoubleClick(clickCount: 2, pageIndex: 3), 3)

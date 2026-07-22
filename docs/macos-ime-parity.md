@@ -1,0 +1,35 @@
+# macOS日本語IME互換性ループ
+
+KarukanのmacOS版は、Apple標準の日本語入力と同じ予測可能性、視覚的な
+安定性、キーボード操作を目標とする。モデル固有の機能は残すが、入力中に
+ユーザーが見る状態や操作方法はプラットフォームの慣例を優先する。
+
+## 反復手順
+
+1. Appleの現行ガイドとTextEdit上の純正IMEで、対象操作を1つ観察する。
+2. Karukanとの差を、再現手順とユーザー影響に分けて記録する。
+3. 失敗するRustまたはSwiftテストを追加し、最小の実装で直す。
+4. `./script/ime_quality_loop.sh --check` でRust、Swift、clippy、format、
+   Thread Sanitizerを通す。
+5. `./script/ime_quality_loop.sh --install` で署名済みアプリを入れ替え、
+   TextEditと普段使うアプリで入力・変換・取消・候補選択を確認する。
+6. 1つのまとまりとしてcommitし、復元点を残してから次の差分へ進む。
+
+## 現在の基準
+
+- ライブ変換中も変換済みの接頭部分を維持し、全文をかなへ戻さない。
+- 候補は8行単位で移動し、数字、矢印、Space、Shift+Space、
+  Control+N/P/R/V、Page Up/Downで操作できる。
+- 文節は個別の下線で分け、選択文節は太い下線にする。
+- 候補パネルはシステムのpopover素材、強調表示色、外観、透明度設定へ
+  追従し、モデル名・処理時間・トークン数などの診断情報を表示しない。
+- 変換候補の学習削除など、現在の選択に必要な操作だけを補助表示する。
+- 候補パネルは現在の選択文節または入力カーソルへ追従し、文節移動や
+  エディタのスクロール後も以前の画面位置に残らない。
+
+## 参照先
+
+- [日本語テキストを入力する](https://support.apple.com/ja-jp/guide/japanese-input-method/jpim10265/mac)
+- [候補選択ウインドウを使用する](https://support.apple.com/ja-jp/guide/japanese-input-method/jpim10262/mac)
+- [日本語変換用のキーボードショートカット](https://support.apple.com/ja-jp/guide/japanese-input-method/jpim10263/mac)
+- [NSVisualEffectViewのpopover素材](https://developer.apple.com/documentation/appkit/nsvisualeffectview/material-swift.enum/popover)

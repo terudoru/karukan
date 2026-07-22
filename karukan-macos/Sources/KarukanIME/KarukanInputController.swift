@@ -37,6 +37,27 @@ func shouldApplyPreeditUpdate(previous: PreeditSnapshot?, next: PreeditSnapshot)
     previous != next
 }
 
+/// InputMethodKit asks for a character index relative to the inline session
+/// when positioning a candidate panel. Conversion candidates belong under the
+/// focused clause, while predictive candidates belong at the composing caret.
+func candidateAnchorUTF16Index(for snapshot: PreeditSnapshot?) -> Int {
+    guard let snapshot else { return 0 }
+    let focusedStart = snapshot.attributes.first {
+        ["underline_double", "highlight", "reverse"].contains($0.style)
+    }?.start
+    return utf16Offset(
+        ofScalarOffset: focusedStart ?? snapshot.caret,
+        in: snapshot.text
+    )
+}
+
+/// Some clients intermittently return a zero rectangle for IMK document
+/// access. Treat it as unavailable so an already-positioned panel keeps its
+/// last valid anchor instead of jumping to the fallback screen coordinate.
+func usableCandidateCursorRect(_ rect: NSRect) -> NSRect? {
+    rect == .zero ? nil : rect
+}
+
 let liveRefreshDebounceMilliseconds = 250
 
 /// Thin InputMethodKit adapter for the karukan engine.
@@ -327,21 +348,22 @@ class KarukanInputController: IMKInputController {
                 Self.candidateWindow.onCandidateDoubleClick = { pageIndex in
                     Self.activeController?.selectCandidateFromWindow(pageIndex: pageIndex)
                 }
-                // Query the composition anchor (a synchronous IPC into the
-                // focused app) only when the panel comes on screen; it
-                // doesn't move while the panel stays visible.
-                var cursorRect: NSRect?
-                if !Self.candidateWindow.isVisible {
-                    var lineHeightRect = NSRect.zero
-                    client.attributes(forCharacterIndex: 0, lineHeightRectangle: &lineHeightRect)
-                    cursorRect = lineHeightRect
-                }
+                // IMK's index is relative to the inline session. Re-query on
+                // every candidate update so the panel follows clause changes,
+                // caret motion, window movement, and editor scrolling instead
+                // of remaining at the first clause's old screen position.
+                let anchor = candidateAnchorUTF16Index(for: displayedPreeditSnapshot)
+                var lineHeightRect = NSRect.zero
+                client.attributes(
+                    forCharacterIndex: anchor,
+                    lineHeightRectangle: &lineHeightRect
+                )
                 Self.candidateWindow.show(
                     candidates: candidates,
                     cursor: cursor,
                     page: page,
                     totalPages: totalPages,
-                    cursorRect: cursorRect
+                    cursorRect: usableCandidateCursorRect(lineHeightRect)
                 )
 
             case .hideCandidates:

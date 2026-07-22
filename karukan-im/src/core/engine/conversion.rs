@@ -1398,7 +1398,7 @@ impl InputMethodEngine {
                     }
                 }
 
-                // Check for digit selection (1-9)
+                // Check for digit selection (1-8 on the macOS-sized page).
                 if let Some(digit) = key.keysym.digit_value() {
                     return self.select_candidate_by_digit(digit);
                 }
@@ -1855,7 +1855,7 @@ impl InputMethodEngine {
         result
     }
 
-    /// Select candidate by digit (1-9)
+    /// Select candidate by digit (1-8 on the macOS-sized page)
     fn select_candidate_by_digit(&mut self, digit: usize) -> EngineResult {
         self.navigate_candidate(|candidates| candidates.select_on_page(digit).is_some())
     }

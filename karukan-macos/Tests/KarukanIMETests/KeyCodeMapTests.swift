@@ -4,6 +4,36 @@ import XCTest
 @testable import KarukanIME
 
 final class KeyCodeMapTests: XCTestCase {
+    func testCandidateAnchorUsesFocusedClauseStartAndUTF16Offsets() {
+        let snapshot = PreeditSnapshot(
+            text: "😀\u{200B}今日",
+            caret: 4,
+            attributes: [
+                PreeditAttr(start: 0, end: 1, style: "underline"),
+                PreeditAttr(start: 2, end: 4, style: "highlight"),
+            ]
+        )
+
+        // Emoji is two UTF-16 units and the internal separator is one.
+        XCTAssertEqual(candidateAnchorUTF16Index(for: snapshot), 3)
+    }
+
+    func testCandidateAnchorFallsBackToComposingCaret() {
+        let snapshot = PreeditSnapshot(
+            text: "😀あ", caret: 2,
+            attributes: [PreeditAttr(start: 0, end: 2, style: "underline")]
+        )
+
+        XCTAssertEqual(candidateAnchorUTF16Index(for: snapshot), 3)
+        XCTAssertEqual(candidateAnchorUTF16Index(for: nil), 0)
+    }
+
+    func testCandidatePositionIgnoresTransientZeroRect() {
+        XCTAssertNil(usableCandidateCursorRect(.zero))
+        let rect = NSRect(x: 20, y: 30, width: 1, height: 18)
+        XCTAssertEqual(usableCandidateCursorRect(rect), rect)
+    }
+
     func testPrintableAscii() {
         let event = KeyCodeMap.translate(
             keyCode: 0, characters: "a", charactersIgnoringModifiers: "a", flags: [])

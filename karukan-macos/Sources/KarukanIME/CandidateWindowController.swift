@@ -4,11 +4,24 @@ func candidateIndexForDoubleClick(clickCount: Int, pageIndex: Int) -> Int? {
     clickCount >= 2 ? pageIndex : nil
 }
 
+private let learningDeleteHint = "Ctrl+Shift+Deleteで履歴から削除"
+
+/// The Rust aux line also carries diagnostics useful to the Linux frontend
+/// (model name, timing, token count, context). A native macOS candidate panel
+/// stays focused on candidates, so retain only an actionable user hint.
+func userFacingCandidateAux(_ text: String?) -> String? {
+    guard let text, text.contains(learningDeleteHint) else { return nil }
+    return learningDeleteHint
+}
+
 /// A candidate row receives mouse events without activating the floating
 /// panel, preserving keyboard focus in the client application.
 final class CandidateRowView: NSView {
     let pageIndex: Int
     var onDoubleClick: ((Int) -> Void)?
+    var isSelected = false {
+        didSet { needsDisplay = true }
+    }
 
     init(pageIndex: Int) {
         self.pageIndex = pageIndex
@@ -25,6 +38,13 @@ final class CandidateRowView: NSView {
         // Labels are presentation only; route the entire row to one click
         // target so double-clicking directly on the candidate text works.
         return self
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard isSelected else { return }
+        NSColor.selectedControlColor.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 4, yRadius: 4).fill()
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
@@ -80,8 +100,8 @@ func candidatePanelFrame(
 /// Custom candidate window (borderless non-activating NSPanel).
 ///
 /// The engine pre-paginates: `show` receives only the visible page plus
-/// page metadata, so this controller just renders rows. An optional aux
-/// line (reading hint / model info from the engine) is shown as a footer.
+/// page metadata, so this controller just renders rows. An optional actionable
+/// hint from the engine may be shown as a footer; diagnostics stay out of UI.
 class CandidateWindowController {
     // Keep the candidate panel close to macOS' built-in Japanese IME scale.
     private static let candidateFontSize: CGFloat = 14
@@ -96,7 +116,7 @@ class CandidateWindowController {
 
     private let panel: NSPanel
     private let stackView: NSStackView
-    private let panelBackgroundView: NSView
+    private let panelBackgroundView: NSVisualEffectView
     private var rowViews: [NSView] = []
     private var auxText: String?
     var onCandidateDoubleClick: ((Int) -> Void)?
@@ -122,14 +142,17 @@ class CandidateWindowController {
         panel.backgroundColor = .clear
         panel.ignoresMouseEvents = false
         panel.hasShadow = true
+        panel.animationBehavior = .none
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        panel.setAccessibilityTitle("変換候補")
 
-        panelBackgroundView = NSView()
+        panelBackgroundView = NSVisualEffectView()
         panelBackgroundView.translatesAutoresizingMaskIntoConstraints = false
+        panelBackgroundView.material = .popover
+        panelBackgroundView.blendingMode = .behindWindow
+        panelBackgroundView.state = .active
         panelBackgroundView.wantsLayer = true
         panelBackgroundView.layer?.cornerRadius = Self.panelCornerRadius
-        panelBackgroundView.layer?.borderWidth = 0.5
-        panelBackgroundView.layer?.borderColor = NSColor.separatorColor.cgColor
-        panelBackgroundView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         panelBackgroundView.layer?.masksToBounds = true
 
         stackView = NSStackView()
@@ -162,10 +185,9 @@ class CandidateWindowController {
 
     var isVisible: Bool { panel.isVisible }
 
-    /// `cursorRect: nil` reuses the rect from the previous `show` — the
-    /// caller can skip its (synchronous, per-keystroke) client IPC while
-    /// the panel is already on screen, since the composition anchor
-    /// doesn't move mid-composition.
+    /// `cursorRect: nil` reuses the last valid rect. This prevents a client
+    /// with temporarily unavailable IMK document access from moving an
+    /// already-positioned panel to a generic fallback coordinate.
     func show(
         candidates: [CandidateItem], cursor: Int, page: Int, totalPages: Int, cursorRect: NSRect?
     ) {
@@ -179,7 +201,7 @@ class CandidateWindowController {
     /// action batch, so the panel is rendered once per batch instead of
     /// once for the aux change and again for the candidates.
     func setAux(_ text: String?, deferRender: Bool = false) {
-        auxText = text
+        auxText = userFacingCandidateAux(text)
         if !deferRender, panel.isVisible, pageState != nil {
             render(cursorRect: nil)
         }
@@ -227,9 +249,11 @@ class CandidateWindowController {
         rowContainer.wantsLayer = true
         rowContainer.layer?.cornerRadius = 4
         rowContainer.layer?.masksToBounds = true
-        rowContainer.layer?.backgroundColor = selected
-            ? NSColor.selectedControlColor.cgColor
-            : NSColor.clear.cgColor
+        rowContainer.isSelected = selected
+        rowContainer.setAccessibilityElement(true)
+        rowContainer.setAccessibilityRole(.row)
+        rowContainer.setAccessibilityLabel(candidate.text)
+        rowContainer.setAccessibilitySelected(selected)
 
         let text = NSMutableAttributedString(
             string: "\(number). \(candidate.text)",
@@ -253,6 +277,7 @@ class CandidateWindowController {
         }
 
         let label = NSTextField(labelWithAttributedString: text)
+        label.setAccessibilityElement(false)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.lineBreakMode = .byTruncatingTail
         label.setContentHuggingPriority(.defaultLow, for: .horizontal)
