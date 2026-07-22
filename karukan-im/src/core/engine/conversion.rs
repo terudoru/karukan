@@ -1399,7 +1399,11 @@ impl InputMethodEngine {
                 }
 
                 // Check for digit selection (1-8 on the macOS-sized page).
-                if let Some(digit) = key.keysym.digit_value() {
+                if !key.modifiers.control_key
+                    && !key.modifiers.alt_key
+                    && !key.modifiers.super_key
+                    && let Some(digit) = key.keysym.digit_value()
+                {
                     return self.select_candidate_by_digit(digit);
                 }
 

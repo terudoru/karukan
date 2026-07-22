@@ -19,6 +19,23 @@ struct CandidateScrollResult: Equatable {
     let remainder: CGFloat
 }
 
+struct CandidateScrollerState: Equatable {
+    let value: Double
+    let knobProportion: Double
+}
+
+func candidateScrollerState(page: Int, totalPages: Int) -> CandidateScrollerState {
+    guard totalPages > 1 else {
+        return CandidateScrollerState(value: 0, knobProportion: 1)
+    }
+    let lastPage = totalPages - 1
+    let clampedPage = min(max(page, 0), lastPage)
+    return CandidateScrollerState(
+        value: Double(clampedPage) / Double(lastPage),
+        knobProportion: 1 / Double(totalPages)
+    )
+}
+
 /// Convert high-resolution trackpad deltas and discrete mouse-wheel ticks to
 /// one candidate step at a time without making tiny trackpad noise jump rows.
 func candidateScrollResult(accumulated: CGFloat, delta: CGFloat, precise: Bool)
@@ -146,7 +163,7 @@ func candidatePanelFrame(
 /// The engine pre-paginates: `show` receives only the visible page plus
 /// page metadata, so this controller just renders rows. An optional actionable
 /// hint from the engine may be shown as a footer; diagnostics stay out of UI.
-class CandidateWindowController {
+class CandidateWindowController: NSObject {
     // Keep the candidate panel close to macOS' built-in Japanese IME scale.
     private static let candidateFontSize: CGFloat = 14
     private static let footerFontSize: CGFloat = 11
@@ -157,16 +174,19 @@ class CandidateWindowController {
     private static let panelCornerRadius: CGFloat = 8
     private static let stackHorizontalInset: CGFloat = 3
     private static let stackVerticalInset: CGFloat = 2
+    private static let scrollerWidth: CGFloat = 11
 
     private let panel: NSPanel
     private let stackView: NSStackView
     private let panelBackgroundView: CandidateBackgroundView
+    private let pageScroller: NSScroller
     private var rowViews: [NSView] = []
     private var auxText: String?
     var onCandidateDoubleClick: ((Int) -> Void)?
     var onCandidateStep: ((Int) -> Void)? {
         didSet { panelBackgroundView.onCandidateStep = onCandidateStep }
     }
+    var onCandidatePageStep: ((Int) -> Void)?
 
     private struct PageState {
         let candidates: [CandidateItem]
@@ -176,7 +196,7 @@ class CandidateWindowController {
     }
     private var pageState: PageState?
 
-    init() {
+    override init() {
         panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
             styleMask: [.nonactivatingPanel, .borderless],
@@ -217,7 +237,20 @@ class CandidateWindowController {
         stackView.setAccessibilityRole(.list)
         stackView.setAccessibilityLabel("変換候補")
 
+        pageScroller = NSScroller()
+        pageScroller.translatesAutoresizingMaskIntoConstraints = false
+        pageScroller.scrollerStyle = .overlay
+        pageScroller.controlSize = .small
+        pageScroller.isHidden = true
+        pageScroller.setAccessibilityLabel("候補ページ")
+
+        super.init()
+
+        pageScroller.target = self
+        pageScroller.action = #selector(pageScrollerChanged(_:))
+
         panelBackgroundView.addSubview(stackView)
+        panelBackgroundView.addSubview(pageScroller)
         panel.contentView?.addSubview(panelBackgroundView)
         if let contentView = panel.contentView {
             NSLayoutConstraint.activate([
@@ -229,7 +262,32 @@ class CandidateWindowController {
                 stackView.leadingAnchor.constraint(equalTo: panelBackgroundView.leadingAnchor),
                 stackView.trailingAnchor.constraint(equalTo: panelBackgroundView.trailingAnchor),
                 stackView.bottomAnchor.constraint(equalTo: panelBackgroundView.bottomAnchor),
+                pageScroller.topAnchor.constraint(
+                    equalTo: panelBackgroundView.topAnchor, constant: 2),
+                pageScroller.trailingAnchor.constraint(
+                    equalTo: panelBackgroundView.trailingAnchor, constant: -1),
+                pageScroller.bottomAnchor.constraint(
+                    equalTo: panelBackgroundView.bottomAnchor, constant: -2),
+                pageScroller.widthAnchor.constraint(equalToConstant: Self.scrollerWidth),
             ])
+        }
+    }
+
+    @objc private func pageScrollerChanged(_ sender: NSScroller) {
+        guard let state = pageState, state.totalPages > 1 else { return }
+        let step: Int
+        switch sender.hitPart {
+        case .decrementLine, .decrementPage:
+            step = -1
+        case .incrementLine, .incrementPage:
+            step = 1
+        default:
+            let targetPage = Int(
+                (sender.doubleValue * Double(state.totalPages - 1)).rounded())
+            step = targetPage - state.page
+        }
+        if step != 0 {
+            onCandidatePageStep?(step)
         }
     }
 
@@ -272,9 +330,11 @@ class CandidateWindowController {
         for (index, candidate) in state.candidates.enumerated() {
             addCandidateRow(candidate, number: index + 1, selected: index == state.cursor)
         }
-        if state.totalPages > 1 {
-            addFooterLabel("[\(state.page + 1)/\(state.totalPages)]")
-        }
+        let scrollerState = candidateScrollerState(
+            page: state.page, totalPages: state.totalPages)
+        pageScroller.doubleValue = scrollerState.value
+        pageScroller.knobProportion = scrollerState.knobProportion
+        pageScroller.isHidden = state.totalPages <= 1
         if let aux = auxText, !aux.isEmpty {
             addFooterLabel(aux)
         }
@@ -368,7 +428,11 @@ class CandidateWindowController {
 
         stackView.layoutSubtreeIfNeeded()
         let contentSize = stackView.fittingSize
-        let panelWidth = max(contentSize.width + Self.panelWidthPadding, Self.minPanelWidth)
+        let scrollerAllowance = pageScroller.isHidden ? 0 : Self.scrollerWidth
+        let panelWidth = max(
+            contentSize.width + Self.panelWidthPadding + scrollerAllowance,
+            Self.minPanelWidth
+        )
         let panelHeight = contentSize.height + Self.panelHeightPadding
 
         guard cursorRect != .zero else {

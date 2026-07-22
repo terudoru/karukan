@@ -70,6 +70,19 @@ enum KeyCodeMap {
     ) -> EngineKeyEvent? {
         let modifiers = modifiers(from: flags)
 
+        // Apple Japanese - Romaji defines a small Option-symbol layer in
+        // Hiragana mode. Resolve it before the generic Option fallback and
+        // send an XKB Unicode keysym with no modifiers so the Rust engine can
+        // keep the symbol in the active marked-text session.
+        if modifiers.alt, !modifiers.control, !modifiers.superKey,
+            let symbol = japaneseOptionSymbol(keyCode: keyCode, shifted: modifiers.shift)
+        {
+            return EngineKeyEvent(
+                keysym: 0x0100_0000 | symbol.value,
+                modifiers: KeyModifiers()
+            )
+        }
+
         if let keysym = specialKeys[keyCode] {
             return EngineKeyEvent(keysym: keysym, modifiers: modifiers)
         }
@@ -96,6 +109,22 @@ enum KeyCodeMap {
             return nil
         }
         return EngineKeyEvent(keysym: keysym, modifiers: modifiers)
+    }
+
+    private static func japaneseOptionSymbol(keyCode: UInt16, shifted: Bool)
+        -> Unicode.Scalar?
+    {
+        // Carbon kVK_ANSI_8 / 9 / Semicolon. These virtual key codes are
+        // stable on ANSI and JIS hardware even when
+        // charactersIgnoringModifiers retains a shifted glyph.
+        switch (keyCode, shifted) {
+        case (28, false): return "〖"
+        case (25, false): return "〗"
+        case (28, true): return "〔"
+        case (25, true): return "〕"
+        case (41, false): return "…"
+        default: return nil
+        }
     }
 
     static func translate(event: NSEvent) -> EngineKeyEvent? {

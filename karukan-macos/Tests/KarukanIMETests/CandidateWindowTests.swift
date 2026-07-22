@@ -4,6 +4,21 @@ import XCTest
 @testable import KarukanIME
 
 final class CandidateWindowTests: XCTestCase {
+    func testCandidateScrollerReflectsPageAndClampsInvalidInput() {
+        XCTAssertEqual(
+            candidateScrollerState(page: 1, totalPages: 3),
+            CandidateScrollerState(value: 0.5, knobProportion: 1.0 / 3.0)
+        )
+        XCTAssertEqual(
+            candidateScrollerState(page: 99, totalPages: 3),
+            CandidateScrollerState(value: 1, knobProportion: 1.0 / 3.0)
+        )
+        XCTAssertEqual(
+            candidateScrollerState(page: 0, totalPages: 1),
+            CandidateScrollerState(value: 0, knobProportion: 1)
+        )
+    }
+
     func testCandidateScrollAccumulatesTrackpadDeltasAndMapsDirection() {
         let partial = candidateScrollResult(accumulated: 0, delta: -3, precise: true)
         XCTAssertEqual(partial, CandidateScrollResult(step: 0, remainder: -3))

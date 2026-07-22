@@ -300,6 +300,18 @@ class KarukanInputController: IMKInputController {
         apply(actions: result.actions, client: client)
     }
 
+    private func moveCandidatePageFromWindow(step: Int) {
+        guard step != 0,
+            let client = activeClientObject as? (any IMKTextInput)
+        else { return }
+        let keysym: UInt32 = step > 0 ? 0xff56 : 0xff55  // Page Down / Page Up
+        for _ in 0..<min(abs(step), 100) {
+            let key = EngineKeyEvent(keysym: keysym, modifiers: KeyModifiers())
+            guard let result = engineClient.processKeySync(key) else { return }
+            apply(actions: result.actions, client: client)
+        }
+    }
+
     // MARK: - Applying engine actions
 
     private func apply(actions: [EngineAction], client: any IMKTextInput) {
@@ -361,6 +373,9 @@ class KarukanInputController: IMKInputController {
                 }
                 Self.candidateWindow.onCandidateStep = { step in
                     Self.activeController?.moveCandidateFromWindow(step: step)
+                }
+                Self.candidateWindow.onCandidatePageStep = { step in
+                    Self.activeController?.moveCandidatePageFromWindow(step: step)
                 }
                 // IMK's index is relative to the inline session. Re-query on
                 // every candidate update so the panel follows clause changes,

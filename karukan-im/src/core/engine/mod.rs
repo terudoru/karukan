@@ -463,6 +463,14 @@ impl InputMethodEngine {
             return EngineResult::not_consumed();
         }
 
+        // Command/Super chords belong to the host application and arbitrary
+        // Option/Alt chords belong to the platform keyboard layout. The
+        // macOS frontend resolves the small set of native Japanese Option
+        // symbol shortcuts to modifier-free Unicode keysyms before this gate.
+        if key.modifiers.super_key || key.modifiers.alt_key {
+            return EngineResult::not_consumed();
+        }
+
         // Ctrl+Shift+L: toggle live conversion (works in all states)
         if key.modifiers.control_key
             && key.modifiers.shift_key

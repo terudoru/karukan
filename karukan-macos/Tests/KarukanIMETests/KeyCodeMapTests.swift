@@ -76,6 +76,27 @@ final class KeyCodeMapTests: XCTestCase {
         XCTAssertEqual(event?.modifiers.alt, true)
     }
 
+    func testJapaneseOptionSymbolShortcutsBecomeUnicodeKeysyms() {
+        let cases: [(UInt16, String, NSEvent.ModifierFlags, Unicode.Scalar)] = [
+            (28, "8", [.option], "〖"),
+            (25, "9", [.option], "〗"),
+            (28, "*", [.option, .shift], "〔"),
+            (25, "(", [.option, .shift], "〕"),
+            (41, ";", [.option], "…"),
+        ]
+        for (keyCode, plain, flags, symbol) in cases {
+            let event = KeyCodeMap.translate(
+                keyCode: keyCode,
+                characters: nil,
+                charactersIgnoringModifiers: plain,
+                flags: flags
+            )
+            XCTAssertEqual(event?.keysym, 0x0100_0000 | symbol.value)
+            XCTAssertEqual(event?.modifiers.alt, false)
+            XCTAssertEqual(event?.modifiers.shift, false)
+        }
+    }
+
     func testSpace() {
         let event = KeyCodeMap.translate(
             keyCode: 49, characters: " ", charactersIgnoringModifiers: " ", flags: [])

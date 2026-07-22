@@ -103,16 +103,19 @@ impl Keysym {
 
     /// Check if this keysym represents a printable character
     pub fn is_printable(&self) -> bool {
-        // ASCII printable range (0x20-0x7e)
+        // ASCII keysyms equal their Unicode code point. XKB encodes Unicode
+        // scalar values above Latin-1 as 0x01000000 | codepoint.
         (0x0020..=0x007e).contains(&self.0)
+            || (0x01000100..=0x0110ffff).contains(&self.0)
+                && char::from_u32(self.0 - 0x01000000).is_some()
     }
 
     /// Try to convert this keysym to a character
     pub fn to_char(&self) -> Option<char> {
-        if self.is_printable() {
-            char::from_u32(self.0)
-        } else {
-            None
+        match self.0 {
+            0x0020..=0x007e => char::from_u32(self.0),
+            0x01000100..=0x0110ffff => char::from_u32(self.0 - 0x01000000),
+            _ => None,
         }
     }
 
@@ -286,6 +289,8 @@ mod tests {
         assert!(Keysym(0x0020).is_printable()); // space
         assert!(!Keysym::BACKSPACE.is_printable());
         assert!(!Keysym::RETURN.is_printable());
+        assert!(Keysym(0x01003016).is_printable());
+        assert_eq!(Keysym(0x01003016).to_char(), Some('〖'));
     }
 
     #[test]

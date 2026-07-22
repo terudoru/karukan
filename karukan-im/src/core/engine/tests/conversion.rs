@@ -82,6 +82,57 @@ fn test_conversion_char_commits_and_continues() {
 }
 
 #[test]
+fn modified_number_and_command_chords_do_not_select_candidates() {
+    let mut engine = InputMethodEngine::new();
+    engine.process_key(&press('a'));
+    engine.process_key(&press_key(Keysym::SPACE));
+    let initial_cursor = engine.state().candidates().unwrap().cursor();
+
+    for event in [
+        KeyEvent::new(
+            Keysym::KEY_1,
+            KeyModifiers {
+                control_key: true,
+                ..KeyModifiers::default()
+            },
+            true,
+        ),
+        KeyEvent::new(
+            Keysym::KEY_1,
+            KeyModifiers {
+                alt_key: true,
+                ..KeyModifiers::default()
+            },
+            true,
+        ),
+        KeyEvent::new(
+            Keysym::DOWN,
+            KeyModifiers {
+                super_key: true,
+                ..KeyModifiers::default()
+            },
+            true,
+        ),
+    ] {
+        let result = engine.process_key(&event);
+        assert!(!result.consumed);
+        assert_eq!(
+            engine.state().candidates().unwrap().cursor(),
+            initial_cursor
+        );
+    }
+}
+
+#[test]
+fn xkb_unicode_symbol_stays_in_the_marked_text_session() {
+    let mut engine = InputMethodEngine::new();
+    let result = engine.process_key(&press_key(Keysym(0x01003016)));
+
+    assert!(result.consumed);
+    assert_eq!(engine.preedit().unwrap().text(), "〖");
+}
+
+#[test]
 fn test_conversion_char_commits_and_continues_romaji() {
     let mut engine = InputMethodEngine::new();
 
