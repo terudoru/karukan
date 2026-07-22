@@ -212,3 +212,70 @@ fn test_ctrl_k_is_one_way_to_katakana() {
     engine.process_key(&press('u'));
     assert_eq!(engine.preedit().unwrap().text(), "アイう");
 }
+
+#[test]
+fn mac_f6_f7_switch_uncommitted_text_script() {
+    let mut engine = InputMethodEngine::new();
+    engine.process_key(&press('a'));
+    engine.process_key(&press('i'));
+
+    let f7 = engine.process_key(&press_key(Keysym::F7));
+    assert!(f7.consumed);
+    assert!(matches!(engine.state(), InputState::Composing { .. }));
+    assert_eq!(engine.preedit().unwrap().text(), "アイ");
+    assert!(
+        f7.actions
+            .iter()
+            .any(|action| matches!(action, EngineAction::HideCandidates))
+    );
+
+    let f6 = engine.process_key(&press_key(Keysym::F6));
+    assert!(f6.consumed);
+    assert_eq!(engine.preedit().unwrap().text(), "あい");
+    assert_eq!(engine.mode.current(), InputMode::Hiragana);
+}
+
+#[test]
+fn mac_ctrl_j_returns_katakana_preedit_to_hiragana() {
+    let mut engine = InputMethodEngine::new();
+    engine.process_key(&press('k'));
+    engine.process_key(&press('a'));
+    engine.process_key(&press_ctrl(Keysym::KEY_K));
+    assert_eq!(engine.preedit().unwrap().text(), "カ");
+
+    let result = engine.process_key(&press_ctrl(Keysym::KEY_J));
+    assert!(result.consumed);
+    assert_eq!(engine.preedit().unwrap().text(), "か");
+    assert_eq!(engine.mode.current(), InputMode::Hiragana);
+}
+
+#[test]
+fn mac_f7_from_conversion_returns_to_katakana_composing() {
+    let mut engine = InputMethodEngine::new();
+    engine.input_buf.insert("あいう");
+    engine.start_conversion(false);
+    assert!(matches!(engine.state(), InputState::Conversion { .. }));
+
+    let result = engine.process_key(&press_key(Keysym::F7));
+    assert!(result.consumed);
+    assert!(matches!(engine.state(), InputState::Composing { .. }));
+    assert_eq!(engine.preedit().unwrap().text(), "アイウ");
+    assert!(
+        result
+            .actions
+            .iter()
+            .any(|action| matches!(action, EngineAction::HideCandidates))
+    );
+}
+
+#[test]
+fn mac_ctrl_k_from_conversion_returns_to_katakana_composing() {
+    let mut engine = InputMethodEngine::new();
+    engine.input_buf.insert("あいう");
+    engine.start_conversion(false);
+
+    let result = engine.process_key(&press_ctrl(Keysym::KEY_K));
+    assert!(result.consumed);
+    assert!(matches!(engine.state(), InputState::Composing { .. }));
+    assert_eq!(engine.preedit().unwrap().text(), "アイウ");
+}

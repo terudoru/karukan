@@ -1316,6 +1316,8 @@ impl InputMethodEngine {
     /// Process key in conversion state
     pub(super) fn process_key_conversion(&mut self, key: &KeyEvent) -> EngineResult {
         match key.keysym {
+            Keysym::F6 => self.convert_preedit_to_hiragana(),
+            Keysym::F7 => self.convert_preedit_to_katakana(),
             Keysym::RETURN => self.commit_conversion(),
             Keysym::ESCAPE => self.cancel_conversion(),
             // macOS Japanese IME candidate navigation.
@@ -1380,6 +1382,17 @@ impl InputMethodEngine {
                         }
                         Keysym::KEY_H | Keysym::KEY_H_UPPER => {
                             return self.backspace_conversion();
+                        }
+                        Keysym::KEY_J | Keysym::KEY_J_UPPER => {
+                            return self.convert_preedit_to_hiragana();
+                        }
+                        Keysym::KEY_K | Keysym::KEY_K_UPPER => {
+                            return self.convert_preedit_to_katakana();
+                        }
+                        // macOS: Control+Z returns the selected conversion
+                        // to its unconverted reading.
+                        Keysym::KEY_Z | Keysym::KEY_Z_UPPER => {
+                            return self.cancel_conversion();
                         }
                         _ => {}
                     }

@@ -81,6 +81,21 @@ final class KeyCodeMapTests: XCTestCase {
         }
     }
 
+    func testKanaScriptFunctionKeys() {
+        XCTAssertEqual(
+            KeyCodeMap.translate(
+                keyCode: 97, characters: nil, charactersIgnoringModifiers: nil, flags: []
+            )?.keysym,
+            0xffc3  // F6
+        )
+        XCTAssertEqual(
+            KeyCodeMap.translate(
+                keyCode: 98, characters: nil, charactersIgnoringModifiers: nil, flags: []
+            )?.keysym,
+            0xffc4  // F7
+        )
+    }
+
     func testControlModifier() {
         let event = KeyCodeMap.translate(
             keyCode: 0, characters: "\u{0c}", charactersIgnoringModifiers: "l",

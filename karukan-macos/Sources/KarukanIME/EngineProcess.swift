@@ -22,6 +22,11 @@ class EngineProcess {
     /// uses this to preserve marked text that the new engine cannot recover.
     var onWillRestart: (() -> Void)?
 
+    /// Called as soon as the current pipes must no longer receive requests.
+    /// Kept separate from `onWillRestart` so transport cleanup cannot be
+    /// overwritten by the IMK adapter's marked-text preservation callback.
+    var onConnectionInvalidated: (() -> Void)?
+
     private let serverPathOverride: String?
 
     /// `serverPath` overrides the bundled binary location (used by tests
@@ -108,6 +113,7 @@ class EngineProcess {
     private func handleTermination(of terminatedProcess: Process) {
         guard process === terminatedProcess, shouldRestart else { return }
 
+        onConnectionInvalidated?()
         onWillRestart?()
         scheduleRestart()
     }
@@ -148,6 +154,7 @@ class EngineProcess {
     /// pass-through). Must be called on the main queue.
     func restart() {
         guard !restartInFlight else { return }
+        onConnectionInvalidated?()
         onWillRestart?()
         restartInFlight = true
         pendingRestart?.cancel()
@@ -175,6 +182,7 @@ class EngineProcess {
     }
 
     func stop() {
+        onConnectionInvalidated?()
         pendingRestart?.cancel()
         pendingRestart = nil
         shouldRestart = false

@@ -207,6 +207,10 @@ impl InputMethodEngine {
                 Keysym::SPACE => return self.input_fullwidth_space(),
                 // Ctrl+K: enter katakana mode
                 Keysym::KEY_K | Keysym::KEY_K_UPPER => return self.enter_katakana_mode(),
+                // macOS: Ctrl+J converts the current preedit to hiragana.
+                Keysym::KEY_J | Keysym::KEY_J_UPPER => {
+                    return self.convert_preedit_to_hiragana();
+                }
                 // Ctrl+A: move to beginning (Emacs-style Home)
                 Keysym::KEY_A | Keysym::KEY_A_UPPER => return self.move_caret_home(),
                 // Ctrl+B: move left (Emacs-style Left)
@@ -225,6 +229,9 @@ impl InputMethodEngine {
         }
 
         match key.keysym {
+            // macOS Japanese IME script conversion shortcuts.
+            Keysym::F6 => self.convert_preedit_to_hiragana(),
+            Keysym::F7 => self.convert_preedit_to_katakana(),
             Keysym::RETURN => self.commit_composing(),
             Keysym::ESCAPE => self.cancel_composing(),
             Keysym::BACKSPACE => self.backspace_composing(),
@@ -384,7 +391,7 @@ impl InputMethodEngine {
         // Skip the learning record for emoji mode — the buffer holds
         // a Slack-style query like `:smile`, not a hiragana reading,
         // so storing it would corrupt the kana-keyed learning cache.
-        if self.mode.current() != InputMode::Emoji {
+        if self.mode.current() != InputMode::Emoji && text != reading {
             self.record_learning(&reading, &text);
         }
 

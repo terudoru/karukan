@@ -19,6 +19,9 @@ class EngineClient {
         let completion: (Data?) -> Void
     }
     private var readerGeneration = 0
+    /// stdin paired with `readerGeneration`. Both are replaced under
+    /// `lock`, so a request can never bind an old pipe to a new reader.
+    private var currentStdin: Pipe?
     private var pendingRequests: [Int: PendingRequest] = [:]
 
     /// `autoInit` re-sends `init` whenever the server (re)starts. Tests
@@ -44,6 +47,9 @@ class EngineClient {
             if autoInit {
                 self?.initAsync()
             }
+        }
+        self.serverProcess.onConnectionInvalidated = { [weak self] in
+            self?.invalidateCurrentConnection()
         }
     }
 
@@ -167,10 +173,14 @@ class EngineClient {
     // MARK: - JSON-RPC transport
 
     func startReaderLoop() {
-        guard let stdout = serverProcess.stdoutPipe else { return }
+        guard
+            let stdout = serverProcess.stdoutPipe,
+            let stdin = serverProcess.stdinPipe
+        else { return }
         lock.lock()
         readerGeneration &+= 1
         let generation = readerGeneration
+        currentStdin = stdin
         lock.unlock()
 
         let queue = DispatchQueue(
@@ -202,15 +212,16 @@ class EngineClient {
     func sendRequest(
         method: String, params: [String: Any], completion: @escaping (Data?) -> Void
     ) -> Int {
-        // Bind the request to the current pipe/generation now. Looking up the
-        // pipe later on requestQueue could accidentally send an old request
-        // into a replacement process after a restart.
-        let stdin = serverProcess.stdinPipe
         lock.lock()
         let id = nextID
         nextID += 1
+        // Bind the pipe and reader generation atomically. Capturing stdin
+        // before taking this lock allowed startReaderLoop() to install a new
+        // generation in between, leaving an old-pipe request tagged as new.
+        let stdin = currentStdin
+        let generation = readerGeneration
         pendingRequests[id] = PendingRequest(
-            readerGeneration: readerGeneration,
+            readerGeneration: generation,
             completion: completion
         )
         lock.unlock()
@@ -225,6 +236,7 @@ class EngineClient {
         requestQueue.async { [weak self] in
             guard let self,
                 let stdin,
+                self.requestIsCurrent(id: id, readerGeneration: generation),
                 var data = try? JSONSerialization.data(withJSONObject: request)
             else {
                 self?.takePending(id: id)?(nil)
@@ -296,11 +308,34 @@ class EngineClient {
         return pendingRequests.removeValue(forKey: id)?.completion
     }
 
+    private func requestIsCurrent(id: Int, readerGeneration: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return self.readerGeneration == readerGeneration
+            && pendingRequests[id]?.readerGeneration == readerGeneration
+            && currentStdin != nil
+    }
+
+    private func invalidateCurrentConnection() {
+        lock.lock()
+        let generation = readerGeneration
+        currentStdin = nil
+        lock.unlock()
+        failPending(readerGeneration: generation)
+        // Let a write that passed requestIsCurrent just before invalidation
+        // finish before EngineProcess closes the pipe. Queued requests now
+        // see currentStdin == nil and complete without writing.
+        requestQueue.sync {}
+    }
+
     private func failPending(readerGeneration: Int) {
         lock.lock()
         let matching = pendingRequests.filter { $0.value.readerGeneration == readerGeneration }
         for id in matching.keys {
             pendingRequests.removeValue(forKey: id)
+        }
+        if self.readerGeneration == readerGeneration {
+            currentStdin = nil
         }
         lock.unlock()
         for request in matching.values {

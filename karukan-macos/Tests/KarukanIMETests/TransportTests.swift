@@ -134,6 +134,34 @@ final class TransportTests: XCTestCase {
         let data = client.sendRequestSync(method: "status", params: [:], timeout: 5.0)
         XCTAssertNotNil(data)
     }
+
+    func testConcurrentRequestsAcrossRestartDoNotPoisonNewConnection() throws {
+        for iteration in 0..<5 {
+            let completions = expectation(
+                description: "generation \(iteration) requests completed")
+            completions.expectedFulfillmentCount = 20
+            DispatchQueue.concurrentPerform(iterations: 20) { _ in
+                client.sendRequest(method: "status", params: [:]) { _ in
+                    completions.fulfill()
+                }
+            }
+
+            let restarted = expectation(description: "generation \(iteration) restarted")
+            let previousOnRestart = process.onRestart
+            process.onRestart = {
+                previousOnRestart?()
+                restarted.fulfill()
+            }
+            process.restart()
+            wait(for: [completions, restarted], timeout: 5.0)
+            process.onRestart = previousOnRestart
+
+            XCTAssertNotNil(
+                client.sendRequestSync(method: "status", params: [:], timeout: 1.0),
+                "new reader generation must remain usable after iteration \(iteration)"
+            )
+        }
+    }
 }
 
 final class RestartPreeditTests: XCTestCase {

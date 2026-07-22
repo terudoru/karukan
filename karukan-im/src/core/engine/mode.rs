@@ -5,6 +5,40 @@ use tracing::debug;
 use super::*;
 
 impl InputMethodEngine {
+    /// Replace the current composing/conversion surface with the requested
+    /// kana script. This mirrors macOS F6/F7 and Control+J/K: it discards
+    /// candidate selection, keeps the reading, and stays uncommitted.
+    fn convert_preedit_script(&mut self, target: InputMode) -> EngineResult {
+        debug_assert!(matches!(target, InputMode::Hiragana | InputMode::Katakana));
+
+        self.flush_romaji_to_composed();
+        if target == InputMode::Hiragana {
+            self.input_buf.text = karukan_engine::katakana_to_hiragana(&self.input_buf.text);
+        }
+        self.input_buf.cursor_pos = self
+            .input_buf
+            .cursor_pos
+            .min(self.input_buf.text.chars().count());
+        self.converters.romaji.reset();
+        self.mode.set(target);
+        self.live.text.clear();
+        self.chunks.clear();
+
+        let preedit = self.set_composing_state();
+        EngineResult::consumed()
+            .with_action(EngineAction::UpdatePreedit(preedit))
+            .with_action(EngineAction::HideCandidates)
+            .with_action(EngineAction::UpdateAuxText(self.format_aux_composing()))
+    }
+
+    pub(super) fn convert_preedit_to_hiragana(&mut self) -> EngineResult {
+        self.convert_preedit_script(InputMode::Hiragana)
+    }
+
+    pub(super) fn convert_preedit_to_katakana(&mut self) -> EngineResult {
+        self.convert_preedit_script(InputMode::Katakana)
+    }
+
     /// Enter katakana mode (Ctrl+k)
     /// One-way switch to Katakana; a mode toggle key (Right Super, JIS 変換,
     /// macOS かな/right-⌘ tap) returns to Hiragana.

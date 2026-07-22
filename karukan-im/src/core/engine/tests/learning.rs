@@ -85,6 +85,31 @@ fn build_candidates_omits_learning_when_skipped() {
 }
 
 #[test]
+fn plain_enter_commit_does_not_learn_identity_candidate() {
+    let mut engine = InputMethodEngine::new();
+    engine.learning = Some(LearningCache::new(LearningConfig::default()));
+    engine.process_key(&press('a'));
+    engine.process_key(&press('i'));
+
+    engine.process_key(&press_key(Keysym::RETURN));
+
+    assert!(engine.learning.as_ref().unwrap().lookup("あい").is_empty());
+}
+
+#[test]
+fn live_conversion_enter_commit_still_learns_changed_surface() {
+    let mut engine = InputMethodEngine::new();
+    engine.learning = Some(LearningCache::new(LearningConfig::default()));
+    engine.process_key(&press('a'));
+    engine.process_key(&press('i'));
+    engine.live.text = "愛".to_string();
+
+    engine.process_key(&press_key(Keysym::RETURN));
+
+    assert_eq!(engine.learning.as_ref().unwrap().lookup("あい")[0].0, "愛");
+}
+
+#[test]
 fn tab_key_skips_learning_in_composing() {
     // End-to-end: type the reading, press Tab → learned candidate is gone.
     let mut engine = engine_with_learned("あい", "藍");

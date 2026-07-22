@@ -24,6 +24,10 @@ impl Keysym {
     pub const PAGE_DOWN: Keysym = Keysym(0xff56);
     pub const END: Keysym = Keysym(0xff57);
 
+    // Function keys used by the macOS Japanese IME script shortcuts.
+    pub const F6: Keysym = Keysym(0xffc3);
+    pub const F7: Keysym = Keysym(0xffc4);
+
     // Modifiers
     pub const SHIFT_L: Keysym = Keysym(0xffe1);
     pub const SHIFT_R: Keysym = Keysym(0xffe2);
@@ -74,6 +78,8 @@ impl Keysym {
     pub const KEY_H_UPPER: Keysym = Keysym(0x0048); // uppercase 'H'
     pub const KEY_I: Keysym = Keysym(0x0069); // lowercase 'i'
     pub const KEY_I_UPPER: Keysym = Keysym(0x0049); // uppercase 'I'
+    pub const KEY_J: Keysym = Keysym(0x006a); // lowercase 'j'
+    pub const KEY_J_UPPER: Keysym = Keysym(0x004a); // uppercase 'J'
     pub const KEY_K: Keysym = Keysym(0x006b); // lowercase 'k'
     pub const KEY_K_UPPER: Keysym = Keysym(0x004b); // uppercase 'K'
     pub const KEY_N: Keysym = Keysym(0x006e); // lowercase 'n'
@@ -92,6 +98,8 @@ impl Keysym {
     pub const KEY_V_UPPER: Keysym = Keysym(0x0056); // uppercase 'V'
     pub const KEY_W: Keysym = Keysym(0x0077); // lowercase 'w'
     pub const KEY_W_UPPER: Keysym = Keysym(0x0057); // uppercase 'W'
+    pub const KEY_Z: Keysym = Keysym(0x007a); // lowercase 'z'
+    pub const KEY_Z_UPPER: Keysym = Keysym(0x005a); // uppercase 'Z'
 
     /// Check if this keysym represents a printable character
     pub fn is_printable(&self) -> bool {

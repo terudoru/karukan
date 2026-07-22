@@ -592,6 +592,25 @@ fn mac_clause_shortcuts_select_and_resize_without_losing_reading() {
 }
 
 #[test]
+fn mac_control_z_returns_conversion_to_reading() {
+    let mut engine = InputMethodEngine::new();
+    engine.input_buf.insert("あいう");
+    engine.start_conversion(false);
+    assert!(matches!(engine.state(), InputState::Conversion { .. }));
+
+    let result = engine.process_key(&press_ctrl(Keysym::KEY_Z));
+    assert!(result.consumed);
+    assert!(matches!(engine.state(), InputState::Composing { .. }));
+    assert_eq!(engine.preedit().unwrap().text(), "あいう");
+    assert!(
+        result
+            .actions
+            .iter()
+            .any(|action| matches!(action, EngineAction::HideCandidates))
+    );
+}
+
+#[test]
 fn shrinking_whole_conversion_creates_a_following_clause() {
     let mut engine = InputMethodEngine::new();
     engine.input_buf.insert("あいう");
