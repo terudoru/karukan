@@ -86,10 +86,9 @@ class EngineClient {
             "modifiers": key.modifiers.jsonObject,
             "is_release": false,
         ]
-        // Normal key processing is rule-based and deferred live inference is
-        // lightweight. 1.5 seconds still covers observed cached model
-        // initialization while halving the former three-second freeze window
-        // for a wedged child.
+        // Normal typing is rule-based; cold dictionaries/models initialize
+        // independently in the server. Keep a finite allowance for explicit
+        // Space conversion while bounding the freeze from a wedged child.
         return keyResultSync(method: "process_key", params: params, timeout: 1.5)
     }
 

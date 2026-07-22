@@ -86,7 +86,7 @@ impl RpcError {
     pub const METHOD_NOT_FOUND: i32 = -32601;
     pub const INVALID_PARAMS: i32 = -32602;
     pub const INTERNAL_ERROR: i32 = -32603;
-    /// Engine initialization failed (model/dictionary load error).
+    /// Engine initialization worker could not be started.
     pub const INIT_FAILED: i32 = -32000;
 
     pub fn new(code: i32, message: impl Into<String>) -> Self {

@@ -83,6 +83,9 @@ impl ImServer {
     }
 
     fn dispatch(&mut self, method: &str, params: Value) -> Result<Value, RpcError> {
+        // Cold dictionaries/models complete off-thread. Install them only
+        // between requests so the live engine is never mutated concurrently.
+        self.engine.poll_resource_initialization();
         match method {
             "init" => self.handle_init(),
             "process_key" => {
@@ -151,7 +154,7 @@ impl ImServer {
                 .settings
                 .take()
                 .unwrap_or_else(|| Settings::load().unwrap_or_default());
-            if let Err(e) = self.engine.init_from_settings(&settings) {
+            if let Err(e) = self.engine.init_from_settings_async(&settings) {
                 // Keep the settings so a retried `init` uses the same ones.
                 self.settings = Some(settings);
                 return Err(RpcError::new(RpcError::INIT_FAILED, format!("{e:#}")));

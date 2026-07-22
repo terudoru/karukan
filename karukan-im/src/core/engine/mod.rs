@@ -144,6 +144,11 @@ pub struct InputMethodEngine {
     learning: Option<LearningCache>,
     /// Result channel for the non-blocking system dictionary update check.
     dictionary_update: Option<Receiver<Result<BackgroundDictionaryUpdate, String>>>,
+    /// Dictionaries and models can take seconds to initialize on a cold
+    /// start. The macOS server builds them off-thread while rule-based input
+    /// remains usable, then installs them between key events through this
+    /// channel.
+    resource_initialization: Option<Receiver<Result<Box<InputMethodEngine>, String>>>,
     /// The macOS stdio frontend asks key handling to return the rule-based
     /// preedit immediately, then requests live conversion after a short idle
     /// debounce. Linux/fcitx5 keeps the existing synchronous path.
@@ -171,6 +176,7 @@ impl InputMethodEngine {
             dicts: Dictionaries::default(),
             learning: None,
             dictionary_update: None,
+            resource_initialization: None,
             defer_live_conversion: false,
         }
     }
@@ -211,6 +217,7 @@ impl InputMethodEngine {
         match (main, sub) {
             (Some(m), Some(s)) => format!("{}+{}", m, s),
             (Some(m), None) => m.to_string(),
+            _ if self.resource_initialization.is_some() => "initializing".to_string(),
             _ => "unknown".to_string(),
         }
     }
@@ -430,6 +437,7 @@ impl InputMethodEngine {
 
     /// Process a key event
     pub fn process_key(&mut self, key: &KeyEvent) -> EngineResult {
+        self.poll_resource_initialization();
         self.poll_dictionary_update();
 
         // Log modifier key events for debugging key mapping issues
@@ -506,6 +514,7 @@ impl InputMethodEngine {
     /// Refresh the current composing preedit with a live-conversion result.
     /// Returns no actions when composition has ended or live conversion is off.
     pub fn refresh_live_conversion(&mut self) -> EngineResult {
+        self.poll_resource_initialization();
         let start = std::time::Instant::now();
         self.metrics.conversion_ms = 0;
 
