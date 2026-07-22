@@ -146,14 +146,22 @@ fn test_conversion_can_select_candidates_per_segment() {
         panic!("expected conversion state");
     };
     assert_eq!(*active_segment, 0);
-    assert_eq!(segments.len(), 1);
-    assert_eq!(segments[0].reading, "あいうえ");
-    assert_eq!(engine.preedit().unwrap().text(), "あいうえ");
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].reading, "あい");
+    assert_eq!(segments[1].reading, "うえ");
+    let initial_second_surface = segments[1]
+        .candidates
+        .selected_text()
+        .unwrap_or(&segments[1].reading)
+        .to_string();
 
-    // Select the katakana fallback by value. Model candidates and their order
-    // can change independently of this segmentation behavior.
-    navigate_active_candidate_to(&mut engine, "アイウエ");
-    assert_eq!(visible_preedit_text(&engine), "アイウエ");
+    // Conversion starts with the first clause focused, matching macOS.
+    // Select its katakana fallback by value; candidate order is model-dependent.
+    navigate_active_candidate_to(&mut engine, "アイ");
+    assert_eq!(
+        visible_preedit_text(&engine),
+        format!("アイ{initial_second_surface}")
+    );
     assert_eq!(
         engine
             .preedit()
@@ -163,11 +171,11 @@ fn test_conversion_can_select_candidates_per_segment() {
             .filter(|a| a.attr_type == AttributeType::Highlight)
             .map(|a| (a.start, a.end))
             .collect::<Vec<_>>(),
-        vec![(0, 4)]
+        vec![(0, 2)]
     );
 
-    // Move right: this is when the underline is split into per-segment ranges.
-    // The visible conversion must remain katakana, not snap back to hiragana.
+    // Move right to the already-present second clause. The first clause must
+    // keep its selected surface.
     engine.process_key(&press_key(Keysym::RIGHT));
     let InputState::Conversion {
         segments,
@@ -181,7 +189,10 @@ fn test_conversion_can_select_candidates_per_segment() {
     assert_eq!(segments.len(), 2);
     assert_eq!(segments[0].reading, "あい");
     assert_eq!(segments[1].reading, "うえ");
-    assert_eq!(visible_preedit_text(&engine), "アイウエ");
+    assert_eq!(
+        visible_preedit_text(&engine),
+        format!("アイ{initial_second_surface}")
+    );
     assert_eq!(
         engine
             .preedit()
@@ -191,20 +202,18 @@ fn test_conversion_can_select_candidates_per_segment() {
             .filter(|a| a.attr_type == AttributeType::Highlight)
             .map(|a| (a.start, a.end))
             .collect::<Vec<_>>(),
-        vec![(3, 5)]
+        vec![(3, 3 + initial_second_surface.chars().count())]
     );
 
-    // Change only the active second segment, selecting by value rather than
-    // assuming it is exactly one Space after the model-dependent candidate.
-    navigate_active_candidate_to(&mut engine, "うえ");
-    assert_eq!(visible_preedit_text(&engine), "アイうえ");
+    navigate_active_candidate_to(&mut engine, "ウエ");
+    assert_eq!(visible_preedit_text(&engine), "アイウエ");
 
     let result = engine.process_key(&press_key(Keysym::RETURN));
     assert!(
         result
             .actions
             .iter()
-            .any(|a| { matches!(a, EngineAction::Commit(text) if text == "アイうえ") })
+            .any(|a| { matches!(a, EngineAction::Commit(text) if text == "アイウエ") })
     );
 }
 
@@ -220,11 +229,34 @@ fn test_explicit_conversion_splits_short_sentence_at_particles() {
 
     engine.start_conversion(false);
 
-    let InputState::Conversion { segments, .. } = engine.state() else {
+    let InputState::Conversion {
+        segments,
+        active_segment,
+        ..
+    } = engine.state()
+    else {
         panic!("expected conversion state");
     };
-    assert_eq!(segments.len(), 1);
-    assert_eq!(segments[0].reading, "きょうはいいてんき");
+    assert_eq!(*active_segment, 0);
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| segment.reading.as_str())
+            .collect::<Vec<_>>(),
+        vec!["きょう", "は", "いい", "てんき"]
+    );
+    assert_eq!(
+        engine
+            .preedit()
+            .unwrap()
+            .attributes()
+            .iter()
+            .filter(|attribute| attribute.attr_type == AttributeType::Highlight)
+            .map(|attribute| (attribute.start, attribute.end))
+            .collect::<Vec<_>>(),
+        vec![(0, 2)],
+        "conversion must begin with the first clause focused"
+    );
 
     engine.process_key(&press_key(Keysym::RIGHT));
 

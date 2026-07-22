@@ -156,7 +156,7 @@ fn test_explicit_commit_method() {
 }
 
 #[test]
-fn test_select_candidate_commits_page_candidate() {
+fn test_select_candidate_waits_for_return_before_commit() {
     let mut server = test_server();
     press(&mut server, XKB_KEY_K);
     press(&mut server, XKB_KEY_A);
@@ -165,21 +165,33 @@ fn test_select_candidate_commits_page_candidate() {
     // the hiragana/katakana fallback and the rewriter.
     let resp = press(&mut server, XKB_KEY_SPACE);
     let shows = actions_of(&resp, "show_candidates");
-    let first_text = shows.last().unwrap()["candidates"][0]["text"].clone();
+    let second_text = shows.last().unwrap()["candidates"][1]["text"].clone();
 
     let resp = request(
         &mut server,
-        json!({"jsonrpc":"2.0","id":20,"method":"select_candidate","params":{"page_index":0}}),
+        json!({"jsonrpc":"2.0","id":20,"method":"select_candidate","params":{"page_index":1}}),
     );
     assert_eq!(resp["result"]["consumed"], true);
-    let commits = actions_of(&resp, "commit");
-    assert_eq!(commits.last().unwrap()["text"], first_text);
-    assert!(actions_of(&resp, "update_preedit").is_empty());
-    assert!(!actions_of(&resp, "hide_candidates").is_empty());
+    assert!(actions_of(&resp, "commit").is_empty());
+    assert_eq!(
+        actions_of(&resp, "update_preedit").last().unwrap()["text"],
+        second_text
+    );
 
     let resp = request(
         &mut server,
         json!({"jsonrpc":"2.0","id":21,"method":"status"}),
+    );
+    assert_eq!(resp["result"]["state"], "conversion");
+
+    let resp = press(&mut server, XKB_KEY_RETURN);
+    assert_eq!(
+        actions_of(&resp, "commit").last().unwrap()["text"],
+        second_text
+    );
+    let resp = request(
+        &mut server,
+        json!({"jsonrpc":"2.0","id":24,"method":"status"}),
     );
     assert_eq!(resp["result"]["state"], "empty");
 }

@@ -505,10 +505,10 @@ impl InputMethodEngine {
             return EngineResult::consumed();
         }
 
-        let segments =
+        let initial_segments =
             self.build_initial_conversion_segment(&reading, &prev_suggest_text, skip_learning);
 
-        if segments.is_empty() {
+        if initial_segments.is_empty() {
             // No candidates, stay in hiragana mode
             let preedit = Preedit::with_text_underlined(&reading);
             self.state = InputState::Composing {
@@ -517,6 +517,23 @@ impl InputMethodEngine {
             };
             return EngineResult::consumed().with_action(EngineAction::UpdatePreedit(preedit));
         }
+
+        // macOS enters conversion with clause boundaries already present and
+        // the first clause focused. Previously Karukan kept the entire
+        // reading as one segment until the first Left/Right key, so that key
+        // both changed the segmentation and moved focus. Besides looking
+        // different, Shift+Left/Right then resized the wrong clause.
+        let current_surface = initial_segments[0]
+            .candidates
+            .selected_text()
+            .unwrap_or(&reading)
+            .to_string();
+        let navigation_segments = self.build_navigation_segments(&reading, &current_surface);
+        let segments = if navigation_segments.len() > 1 {
+            navigation_segments
+        } else {
+            initial_segments
+        };
 
         self.enter_conversion_state(segments)
     }
@@ -1731,9 +1748,9 @@ impl InputMethodEngine {
         self.conversion_update_result(preedit, candidates, &reading)
     }
 
-    /// Select and commit the candidate at `page_index` (0-based) within the
-    /// current page, like pressing the digit key `page_index + 1`. Not
-    /// consumed unless a candidate list is active (Conversion state).
+    /// Select the candidate at `page_index` (0-based) within the current
+    /// page, like pressing the digit key `page_index + 1`. macOS keeps the
+    /// composition active until Return confirms the selection.
     pub fn select_candidate_on_page(&mut self, page_index: usize) -> EngineResult {
         let start = std::time::Instant::now();
         self.metrics.conversion_ms = 0;
@@ -1744,52 +1761,7 @@ impl InputMethodEngine {
 
     /// Select candidate by digit (1-9)
     fn select_candidate_by_digit(&mut self, digit: usize) -> EngineResult {
-        let selections = {
-            let InputState::Conversion {
-                candidates,
-                segments,
-                active_segment,
-                ..
-            } = &mut self.state
-            else {
-                return EngineResult::not_consumed();
-            };
-
-            if candidates.select_on_page(digit).is_none() {
-                return EngineResult::consumed();
-            }
-
-            if let Some(segment) = segments.get_mut(*active_segment) {
-                segment.candidates = candidates.clone();
-            }
-
-            segments
-                .iter()
-                .map(|segment| {
-                    let selected = segment.candidates.selected().cloned().unwrap_or_else(|| {
-                        Candidate::with_reading(&segment.reading, &segment.reading)
-                    });
-                    let reading = selected.reading.unwrap_or_else(|| segment.reading.clone());
-                    (reading, selected.text)
-                })
-                .collect::<Vec<_>>()
-        };
-        let selected_text: String = selections.iter().map(|(_, text)| text.as_str()).collect();
-
-        self.record_conversion_learning(&selections);
-
-        // Commit immediately after digit selection
-
-        self.state = InputState::Empty;
-        self.input_buf.clear();
-        self.live.text.clear();
-        self.chunks.clear();
-        self.mode.exit_temporary();
-
-        EngineResult::consumed()
-            .with_action(EngineAction::HideCandidates)
-            .with_action(EngineAction::HideAuxText)
-            .with_action(EngineAction::Commit(selected_text))
+        self.navigate_candidate(|candidates| candidates.select_on_page(digit).is_some())
     }
 
     /// Build UI update actions after conversion state changed.
