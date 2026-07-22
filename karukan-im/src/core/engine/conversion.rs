@@ -1225,8 +1225,17 @@ impl InputMethodEngine {
         match key.keysym {
             Keysym::RETURN => self.commit_conversion(),
             Keysym::ESCAPE => self.cancel_conversion(),
+            // macOS Japanese IME candidate navigation.
+            Keysym::SPACE if key.modifiers.shift_key => self.prev_candidate(),
+            Keysym::DOWN if key.modifiers.shift_key => self.next_candidate_page(),
+            Keysym::UP if key.modifiers.shift_key => self.prev_candidate_page(),
             Keysym::SPACE | Keysym::DOWN | Keysym::TAB => self.next_candidate(),
             Keysym::UP => self.prev_candidate(),
+            // A selected clause grows/shrinks one reading character at a
+            // time with Shift+Right/Left. Bare arrows remain accepted for
+            // clause navigation for existing Karukan/fcitx5 users.
+            Keysym::LEFT if key.modifiers.shift_key => self.shrink_conversion_segment(),
+            Keysym::RIGHT if key.modifiers.shift_key => self.expand_conversion_segment(),
             Keysym::LEFT => self.prev_conversion_segment(),
             Keysym::RIGHT => self.next_conversion_segment(),
             Keysym::PAGE_DOWN => self.next_candidate_page(),
@@ -1252,6 +1261,28 @@ impl InputMethodEngine {
                     match key.keysym {
                         Keysym::KEY_N | Keysym::KEY_N_UPPER => return self.next_candidate(),
                         Keysym::KEY_P | Keysym::KEY_P_UPPER => return self.prev_candidate(),
+                        Keysym::KEY_B | Keysym::KEY_B_UPPER => {
+                            return self.next_conversion_segment();
+                        }
+                        Keysym::KEY_F | Keysym::KEY_F_UPPER => {
+                            return self.prev_conversion_segment();
+                        }
+                        Keysym::KEY_W
+                        | Keysym::KEY_W_UPPER
+                        | Keysym::KEY_O
+                        | Keysym::KEY_O_UPPER => return self.expand_conversion_segment(),
+                        Keysym::KEY_I | Keysym::KEY_I_UPPER => {
+                            return self.shrink_conversion_segment();
+                        }
+                        Keysym::KEY_V | Keysym::KEY_V_UPPER => {
+                            return self.next_candidate_page();
+                        }
+                        Keysym::KEY_R | Keysym::KEY_R_UPPER => {
+                            return self.prev_candidate_page();
+                        }
+                        Keysym::KEY_H | Keysym::KEY_H_UPPER => {
+                            return self.backspace_conversion();
+                        }
                         _ => {}
                     }
                 }
@@ -1605,6 +1636,99 @@ impl InputMethodEngine {
 
     fn prev_conversion_segment(&mut self) -> EngineResult {
         self.move_conversion_segment(-1)
+    }
+
+    /// Move one reading character across the boundary to the right of the
+    /// active clause, then reconvert only the two clauses whose readings
+    /// changed. This mirrors macOS Shift+Right / Control+W / Control+O.
+    fn expand_conversion_segment(&mut self) -> EngineResult {
+        self.resize_conversion_segment(true)
+    }
+
+    /// Move the last reading character of the active clause into the next
+    /// clause, creating that clause when necessary. The active clause is
+    /// never allowed to become empty.
+    fn shrink_conversion_segment(&mut self) -> EngineResult {
+        self.resize_conversion_segment(false)
+    }
+
+    fn resize_conversion_segment(&mut self, expand: bool) -> EngineResult {
+        let (mut segments, active_segment) = match &self.state {
+            InputState::Conversion {
+                segments,
+                active_segment,
+                ..
+            } => (segments.clone(), *active_segment),
+            _ => return EngineResult::not_consumed(),
+        };
+
+        if expand {
+            let Some(next_segment) = segments.get(active_segment + 1) else {
+                return EngineResult::consumed();
+            };
+            let mut next_chars = next_segment.reading.chars();
+            let Some(moved) = next_chars.next() else {
+                return EngineResult::consumed();
+            };
+            let next_reading: String = next_chars.collect();
+            segments[active_segment].reading.push(moved);
+            let active_reading = segments[active_segment].reading.clone();
+            segments[active_segment].candidates =
+                self.candidate_list_for_conversion_segment(&active_reading, None, false);
+
+            if next_reading.is_empty() {
+                segments.remove(active_segment + 1);
+            } else {
+                segments[active_segment + 1].reading = next_reading.clone();
+                segments[active_segment + 1].candidates =
+                    self.candidate_list_for_conversion_segment(&next_reading, None, false);
+            }
+        } else {
+            let mut active_chars: Vec<char> = segments[active_segment].reading.chars().collect();
+            if active_chars.len() <= 1 {
+                return EngineResult::consumed();
+            }
+            let moved = active_chars.pop().expect("length checked above");
+            let active_reading: String = active_chars.into_iter().collect();
+            segments[active_segment].reading = active_reading.clone();
+            segments[active_segment].candidates =
+                self.candidate_list_for_conversion_segment(&active_reading, None, false);
+
+            if let Some(next_segment) = segments.get_mut(active_segment + 1) {
+                let next_reading = format!("{moved}{}", next_segment.reading);
+                next_segment.reading = next_reading.clone();
+                next_segment.candidates =
+                    self.candidate_list_for_conversion_segment(&next_reading, None, false);
+            } else {
+                let next_reading = moved.to_string();
+                let candidates =
+                    self.candidate_list_for_conversion_segment(&next_reading, None, false);
+                segments.push(ConversionSegment {
+                    reading: next_reading,
+                    candidates,
+                });
+            }
+        }
+
+        debug_assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.reading.as_str())
+                .collect::<String>(),
+            self.input_buf.text,
+            "clause resizing must preserve the complete reading"
+        );
+
+        let candidates = segments[active_segment].candidates.clone();
+        let reading = segments[active_segment].reading.clone();
+        let preedit = Self::build_conversion_preedit_from_segments(&segments, active_segment);
+        self.state = InputState::Conversion {
+            preedit: preedit.clone(),
+            candidates: candidates.clone(),
+            segments,
+            active_segment,
+        };
+        self.conversion_update_result(preedit, candidates, &reading)
     }
 
     /// Select and commit the candidate at `page_index` (0-based) within the

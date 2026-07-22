@@ -364,3 +364,20 @@ fn test_cursor_composed_hiragana_tracking() {
     assert_eq!(engine.input_buf.text, "");
     assert_eq!(engine.input_buf.cursor_pos, 0);
 }
+
+#[test]
+fn mac_control_shortcuts_move_and_delete_in_composing_text() {
+    let mut engine = InputMethodEngine::new();
+    for ch in ['a', 'i', 'u'] {
+        engine.process_key(&press(ch));
+    }
+
+    engine.process_key(&press_ctrl(Keysym::KEY_S));
+    assert_eq!(engine.input_buf.cursor_pos, 2);
+    engine.process_key(&press_ctrl(Keysym::KEY_D));
+    assert_eq!(engine.input_buf.cursor_pos, 3);
+
+    engine.process_key(&press_ctrl(Keysym::KEY_H));
+    assert_eq!(engine.input_buf.text, "あい");
+    assert_eq!(engine.input_buf.cursor_pos, 2);
+}

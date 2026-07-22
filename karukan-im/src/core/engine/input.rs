@@ -209,6 +209,11 @@ impl InputMethodEngine {
                 Keysym::KEY_E | Keysym::KEY_E_UPPER => return self.move_caret_end(),
                 // Ctrl+F: move right (Emacs-style Right)
                 Keysym::KEY_F | Keysym::KEY_F_UPPER => return self.move_caret_right(),
+                // macOS Japanese IME aliases: Ctrl+S/D move the insertion
+                // point left/right and Ctrl+H deletes backward.
+                Keysym::KEY_S | Keysym::KEY_S_UPPER => return self.move_caret_left(),
+                Keysym::KEY_D | Keysym::KEY_D_UPPER => return self.move_caret_right(),
+                Keysym::KEY_H | Keysym::KEY_H_UPPER => return self.backspace_composing(),
                 _ => {}
             }
         }

@@ -470,3 +470,112 @@ fn test_segment_navigation_preserves_existing_prediction_surface() {
     engine.process_key(&press_key(Keysym::RIGHT));
     assert_eq!(visible_preedit_text(&engine), "今日はいい天気");
 }
+
+#[test]
+fn mac_candidate_shortcuts_move_forward_and_backward() {
+    let mut engine = InputMethodEngine::new();
+    engine.input_buf.insert("あい");
+    engine.start_conversion(false);
+
+    let initial = engine.candidates().unwrap().cursor();
+    engine.process_key(&press_ctrl(Keysym::KEY_N));
+    assert_ne!(engine.candidates().unwrap().cursor(), initial);
+
+    engine.process_key(&press_ctrl(Keysym::KEY_P));
+    assert_eq!(engine.candidates().unwrap().cursor(), initial);
+
+    engine.process_key(&press_key(Keysym::SPACE));
+    assert_ne!(engine.candidates().unwrap().cursor(), initial);
+    engine.process_key(&press_shift_key(Keysym::SPACE));
+    assert_eq!(engine.candidates().unwrap().cursor(), initial);
+}
+
+#[test]
+fn mac_clause_shortcuts_select_and_resize_without_losing_reading() {
+    let mut engine = InputMethodEngine::with_config(EngineConfig {
+        composing_chunk_len: 2,
+        ..EngineConfig::default()
+    });
+    engine.input_buf.insert("あいうえ");
+    engine.start_conversion(false);
+
+    // Control+B selects the next clause and materializes the word-sized
+    // navigation segments; Control+F returns to the previous clause.
+    engine.process_key(&press_ctrl(Keysym::KEY_B));
+    engine.process_key(&press_ctrl(Keysym::KEY_F));
+    let InputState::Conversion {
+        segments,
+        active_segment,
+        ..
+    } = engine.state()
+    else {
+        panic!("expected conversion state");
+    };
+    assert_eq!(*active_segment, 0);
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| segment.reading.as_str())
+            .collect::<Vec<_>>(),
+        vec!["あい", "うえ"]
+    );
+
+    // Shift+Right grows the active clause by one character. Control+I is
+    // the standard shortcut for shrinking it back.
+    engine.process_key(&press_shift_key(Keysym::RIGHT));
+    let InputState::Conversion { segments, .. } = engine.state() else {
+        panic!("expected conversion state");
+    };
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| segment.reading.as_str())
+            .collect::<Vec<_>>(),
+        vec!["あいう", "え"]
+    );
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| segment.reading.as_str())
+            .collect::<String>(),
+        "あいうえ"
+    );
+
+    engine.process_key(&press_ctrl(Keysym::KEY_I));
+    let InputState::Conversion { segments, .. } = engine.state() else {
+        panic!("expected conversion state");
+    };
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| segment.reading.as_str())
+            .collect::<Vec<_>>(),
+        vec!["あい", "うえ"]
+    );
+}
+
+#[test]
+fn shrinking_whole_conversion_creates_a_following_clause() {
+    let mut engine = InputMethodEngine::new();
+    engine.input_buf.insert("あいう");
+    engine.start_conversion(false);
+
+    engine.process_key(&press_shift_key(Keysym::LEFT));
+    let InputState::Conversion { segments, .. } = engine.state() else {
+        panic!("expected conversion state");
+    };
+    assert_eq!(
+        segments
+            .iter()
+            .map(|segment| segment.reading.as_str())
+            .collect::<Vec<_>>(),
+        vec!["あい", "う"]
+    );
+
+    engine.process_key(&press_ctrl(Keysym::KEY_W));
+    let InputState::Conversion { segments, .. } = engine.state() else {
+        panic!("expected conversion state");
+    };
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].reading, "あいう");
+}
