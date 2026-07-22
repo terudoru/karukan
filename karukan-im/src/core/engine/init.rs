@@ -54,6 +54,10 @@ impl InputMethodEngine {
         }
 
         let learning_enabled = settings.learning.enabled;
+        let learning_config = learning_enabled.then_some(LearningConfig {
+            max_entries: settings.learning.max_entries,
+            max_surface_chars: settings.learning.max_surface_chars,
+        });
         let settings = settings.clone();
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::Builder::new()
@@ -65,6 +69,7 @@ impl InputMethodEngine {
             .context("failed to start resource initialization thread")?;
         self.resource_initialization = Some(receiver);
         self.learning_initialization_pending = learning_enabled;
+        self.pending_learning_config = learning_config;
         Ok(())
     }
 
@@ -102,13 +107,8 @@ impl InputMethodEngine {
         self.dicts = loaded.dicts;
         self.learning = loaded.learning;
         self.learning_initialization_pending = false;
-        if let Some(cache) = &mut self.learning {
-            for (reading, surface) in self.pending_learning.drain(..) {
-                cache.record(&reading, &surface);
-            }
-        } else {
-            self.pending_learning.clear();
-        }
+        self.pending_learning_config = None;
+        self.replay_pending_learning();
         self.dictionary_update = loaded.dictionary_update.take();
         // A pre-init refresh may have cached pass-through chunks. Force the
         // next idle refresh to use the newly installed dictionaries/models.
@@ -141,10 +141,22 @@ impl InputMethodEngine {
                 );
             }
             Err(error) => {
-                self.learning_initialization_pending = false;
-                self.pending_learning.clear();
+                // Keep collecting a bounded startup queue. The EOF shutdown
+                // path can merge it into learning.tsv without waiting for a
+                // failed model worker.
+                self.learning_initialization_pending = self.pending_learning_config.is_some();
                 tracing::warn!("Resource initialization failed; keeping rule-based input: {error}");
             }
+        }
+    }
+
+    pub(super) fn replay_pending_learning(&mut self) {
+        if let Some(cache) = &mut self.learning {
+            for (reading, surface) in self.pending_learning.drain(..) {
+                cache.record(&reading, &surface);
+            }
+        } else if !self.learning_initialization_pending {
+            self.pending_learning.clear();
         }
     }
 }

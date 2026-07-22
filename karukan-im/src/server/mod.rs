@@ -54,7 +54,7 @@ impl ImServer {
 
     /// Save the learning cache (called on EOF/shutdown).
     pub fn save_learning(&mut self) {
-        self.engine.save_learning();
+        self.engine.save_learning_before_shutdown();
     }
 
     /// Handle one request line. Returns the response line to write, or

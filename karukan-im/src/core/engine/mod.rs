@@ -146,6 +146,7 @@ pub struct InputMethodEngine {
     /// cache so the first few words after login are not silently forgotten.
     pending_learning: Vec<(String, String)>,
     learning_initialization_pending: bool,
+    pending_learning_config: Option<LearningConfig>,
     /// Result channel for the non-blocking system dictionary update check.
     dictionary_update: Option<Receiver<Result<BackgroundDictionaryUpdate, String>>>,
     /// Dictionaries and models can take seconds to initialize on a cold
@@ -181,6 +182,7 @@ impl InputMethodEngine {
             learning: None,
             pending_learning: Vec::new(),
             learning_initialization_pending: false,
+            pending_learning_config: None,
             dictionary_update: None,
             resource_initialization: None,
             defer_live_conversion: false,
@@ -633,6 +635,22 @@ impl InputMethodEngine {
                 debug!("Learning cache saved to {:?}", path);
             }
         }
+    }
+
+    /// Final shutdown save. If the model worker is still cold, load only the
+    /// small learning file synchronously and merge startup selections rather
+    /// than losing them or waiting for model initialization.
+    pub fn save_learning_before_shutdown(&mut self) {
+        self.poll_resource_initialization();
+        if self.learning.is_none()
+            && !self.pending_learning.is_empty()
+            && let Some(config) = self.pending_learning_config.take()
+        {
+            self.init_learning_cache(true, config);
+            self.replay_pending_learning();
+            self.learning_initialization_pending = false;
+        }
+        self.save_learning();
     }
 }
 
