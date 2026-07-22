@@ -17,7 +17,7 @@ struct KeyResult: Decodable {
     let processKeyMs: UInt64?
 }
 
-struct PreeditAttr: Decodable {
+struct PreeditAttr: Decodable, Equatable {
     let start: Int
     let end: Int
     let style: String

@@ -14,9 +14,11 @@ impl InputMethodEngine {
                     if self.defer_live_conversion {
                         // The macOS frontend renders this rule-based preedit
                         // immediately and asks for neural conversion after an
-                        // idle debounce. Keep the old chunks so that deferred
-                        // conversion can still reuse unchanged prefixes.
-                        self.live.text.clear();
+                        // idle debounce. Keep an already-converted cached
+                        // prefix on screen and append only the new reading;
+                        // reverting the entire preedit to hiragana on every
+                        // key produces a distracting kanji/kana flash.
+                        self.live.text = self.stable_deferred_live_text().unwrap_or_default();
                     } else if let Some(converted) = self.chunked_auto_suggest() {
                         if converted == self.input_buf.text {
                             self.live.text.clear();

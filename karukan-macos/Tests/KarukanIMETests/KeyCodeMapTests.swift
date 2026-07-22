@@ -172,6 +172,19 @@ final class DeferredLiveRefreshTests: XCTestCase {
         let key = EngineKeyEvent(keysym: 0x61, modifiers: modifiers)
         XCTAssertFalse(shouldScheduleDeferredLiveRefresh(after: composingActions, key: key))
     }
+
+    func testIdenticalPreeditUpdateDoesNotRenderAgain() {
+        let snapshot = PreeditSnapshot(
+            text: "今日は", caret: 3,
+            attributes: [PreeditAttr(start: 0, end: 3, style: "underline")])
+        XCTAssertFalse(shouldApplyPreeditUpdate(previous: snapshot, next: snapshot))
+    }
+
+    func testChangedPreeditStillRendersImmediately() {
+        let previous = PreeditSnapshot(text: "今日", caret: 2, attributes: [])
+        let next = PreeditSnapshot(text: "今日は", caret: 3, attributes: [])
+        XCTAssertTrue(shouldApplyPreeditUpdate(previous: previous, next: next))
+    }
 }
 
 final class RightCommandTapDetectorTests: XCTestCase {

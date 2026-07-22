@@ -158,6 +158,42 @@ impl ChunkPlan {
 }
 
 impl InputMethodEngine {
+    /// Keep the already-converted prefix visually stable while a deferred
+    /// live-conversion refresh is waiting to run.
+    ///
+    /// On macOS, neural conversion runs after an idle debounce. Clearing the
+    /// previous conversion on every key made the whole marked range alternate
+    /// between kanji and hiragana before the next result arrived. For a normal
+    /// append, the cached chunks still describe an exact prefix of the new
+    /// reading, so reuse their displayed conversion and append only the newly
+    /// typed reading. Edits that are not a pure append deliberately fall back
+    /// to the raw reading because a converted surface cannot be sliced safely
+    /// by reading offsets.
+    pub(super) fn stable_deferred_live_text(&self) -> Option<String> {
+        if self.chunks.is_empty() {
+            return None;
+        }
+
+        let cached_reading: String = self
+            .chunks
+            .iter()
+            .map(|chunk| chunk.reading.as_str())
+            .collect();
+        let cached_conversion: String = self
+            .chunks
+            .iter()
+            .map(|chunk| chunk.converted.as_str())
+            .collect();
+
+        if cached_conversion == cached_reading {
+            return None;
+        }
+
+        let new_suffix = self.input_buf.text.strip_prefix(&cached_reading)?;
+        let stable = format!("{cached_conversion}{new_suffix}");
+        (stable != self.input_buf.text).then_some(stable)
+    }
+
     /// Auto-suggest over the composing buffer, split into chunks of at most
     /// `config.composing_chunk_len` reading characters so each model call
     /// stays bounded for long input.

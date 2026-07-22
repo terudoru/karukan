@@ -27,6 +27,18 @@ func shouldScheduleDeferredLiveRefresh(
     return hasComposingPreedit && isComposingUpdate
 }
 
+struct PreeditSnapshot: Equatable {
+    let text: String
+    let caret: Int
+    let attributes: [PreeditAttr]
+}
+
+func shouldApplyPreeditUpdate(previous: PreeditSnapshot?, next: PreeditSnapshot) -> Bool {
+    previous != next
+}
+
+let liveRefreshDebounceMilliseconds = 250
+
 /// Thin InputMethodKit adapter for the karukan engine.
 ///
 /// All IME state (Empty → Composing → Conversion, romaji conversion,
@@ -42,6 +54,7 @@ class KarukanInputController: IMKInputController {
     /// engine actions). Used to decide when to refresh surrounding text.
     private var hasPreedit = false
     private var displayedPreedit = ""
+    private var displayedPreeditSnapshot: PreeditSnapshot?
     private weak var activeClientObject: AnyObject?
     private var liveRefreshGeneration = 0
     private var pendingLiveRefresh: DispatchWorkItem?
@@ -213,6 +226,7 @@ class KarukanInputController: IMKInputController {
         invalidateLiveRefresh()
         hasPreedit = false
         displayedPreedit = ""
+        displayedPreeditSnapshot = nil
         activeClientObject = nil
         if Self.activeController === self {
             Self.activeController = nil
@@ -244,7 +258,8 @@ class KarukanInputController: IMKInputController {
             }
         }
         pendingLiveRefresh = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(100), execute: work)
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + .milliseconds(liveRefreshDebounceMilliseconds), execute: work)
     }
 
     private func selectCandidateFromWindow(pageIndex: Int) {
@@ -288,15 +303,25 @@ class KarukanInputController: IMKInputController {
                 client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
 
             case .updatePreedit(let text, let caret, let attributes):
+                let nextSnapshot = PreeditSnapshot(
+                    text: text, caret: caret, attributes: attributes)
+                let needsRender = shouldApplyPreeditUpdate(
+                    previous: displayedPreeditSnapshot, next: nextSnapshot)
                 hasPreedit = !text.isEmpty
                 displayedPreedit = text
+                displayedPreeditSnapshot = nextSnapshot
                 if hasPreedit {
                     activeClientObject = client as AnyObject
                     Self.activeController = self
                 } else {
                     clearCompositionTracking()
                 }
-                setMarkedText(text: text, caret: caret, attributes: attributes, client: client)
+                // Re-applying an identical marked string can make some host
+                // editors tear down and redraw the marked range. Skip that
+                // redundant IMK call so a no-op live refresh cannot flicker.
+                if needsRender {
+                    setMarkedText(text: text, caret: caret, attributes: attributes, client: client)
+                }
 
             case .showCandidates(let candidates, let cursor, let page, let totalPages):
                 Self.candidateWindow.onCandidateDoubleClick = { pageIndex in

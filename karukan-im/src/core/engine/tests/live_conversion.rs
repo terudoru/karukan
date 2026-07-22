@@ -56,6 +56,70 @@ fn deferred_live_conversion_returns_kana_before_refresh() {
 }
 
 #[test]
+fn deferred_append_keeps_converted_prefix_stable_until_refresh() {
+    let mut engine = make_live_conversion_engine();
+    engine.dicts.user = Some(user_dict_with("あい", "愛"));
+
+    engine.process_key_deferred_live(&press('a'));
+    engine.process_key_deferred_live(&press('i'));
+    engine.refresh_live_conversion();
+    assert_eq!(engine.preedit().unwrap().text(), "愛");
+
+    let immediate = engine.process_key_deferred_live(&press('u'));
+    let immediate_text = immediate.actions.iter().find_map(|action| {
+        if let EngineAction::UpdatePreedit(preedit) = action {
+            Some(preedit.text())
+        } else {
+            None
+        }
+    });
+    assert_eq!(immediate_text, Some("愛う"));
+    assert_eq!(engine.live.text, "愛う");
+    assert_eq!(engine.chunks[0].reading, "あい");
+}
+
+#[test]
+fn deferred_partial_romaji_keeps_converted_prefix_visible() {
+    let mut engine = make_live_conversion_engine();
+    engine.dicts.user = Some(user_dict_with("あい", "愛"));
+
+    engine.process_key_deferred_live(&press('a'));
+    engine.process_key_deferred_live(&press('i'));
+    engine.refresh_live_conversion();
+
+    let immediate = engine.process_key_deferred_live(&press('k'));
+    let immediate_text = immediate.actions.iter().find_map(|action| {
+        if let EngineAction::UpdatePreedit(preedit) = action {
+            Some(preedit.text())
+        } else {
+            None
+        }
+    });
+    assert_eq!(immediate_text, Some("愛k"));
+}
+
+#[test]
+fn deferred_non_append_edit_falls_back_to_unsliced_reading() {
+    let mut engine = make_live_conversion_engine();
+    engine.dicts.user = Some(user_dict_with("あい", "愛"));
+
+    engine.process_key_deferred_live(&press('a'));
+    engine.process_key_deferred_live(&press('i'));
+    engine.refresh_live_conversion();
+
+    let immediate = engine.process_key_deferred_live(&press_key(Keysym::BACKSPACE));
+    let immediate_text = immediate.actions.iter().find_map(|action| {
+        if let EngineAction::UpdatePreedit(preedit) = action {
+            Some(preedit.text())
+        } else {
+            None
+        }
+    });
+    assert_eq!(immediate_text, Some("あ"));
+    assert!(engine.live.text.is_empty());
+}
+
+#[test]
 fn deferred_live_refresh_is_inert_after_composition_ends() {
     let mut engine = make_live_conversion_engine();
     engine.process_key_deferred_live(&press('a'));
