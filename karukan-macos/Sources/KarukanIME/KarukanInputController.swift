@@ -193,6 +193,12 @@ class KarukanInputController: IMKInputController {
         }
     }
 
+    private func selectCandidateFromWindow(pageIndex: Int) {
+        guard let client = activeClientObject as? (any IMKTextInput) else { return }
+        guard let result = engineClient.selectCandidateSync(pageIndex: pageIndex) else { return }
+        apply(actions: result.actions, client: client)
+    }
+
     // MARK: - Applying engine actions
 
     private func apply(actions: [EngineAction], client: any IMKTextInput) {
@@ -239,6 +245,9 @@ class KarukanInputController: IMKInputController {
                 setMarkedText(text: text, caret: caret, attributes: attributes, client: client)
 
             case .showCandidates(let candidates, let cursor, let page, let totalPages):
+                Self.candidateWindow.onCandidateDoubleClick = { pageIndex in
+                    Self.activeController?.selectCandidateFromWindow(pageIndex: pageIndex)
+                }
                 // Query the composition anchor (a synchronous IPC into the
                 // focused app) only when the panel comes on screen; it
                 // doesn't move while the panel stays visible.

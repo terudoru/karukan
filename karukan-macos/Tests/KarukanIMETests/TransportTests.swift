@@ -73,6 +73,36 @@ final class TransportTests: XCTestCase {
         }
     }
 
+    func testSynchronousTimeoutTriggersRecovery() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "karukan-silent-server-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        let script = directory.appendingPathComponent("silent-server")
+        try "#!/bin/sh\nsleep 10\n".write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: script.path)
+
+        let silentProcess = EngineProcess(serverPath: script.path)
+        defer {
+            silentProcess.stop()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let recovered = expectation(description: "timeout recovery invoked")
+        let silentClient = EngineClient(
+            serverProcess: silentProcess,
+            autoInit: false,
+            timeoutRecovery: { recovered.fulfill() }
+        )
+        XCTAssertTrue(silentProcess.start())
+        silentClient.startReaderLoop()
+
+        let data = silentClient.sendRequestSync(
+            method: "status", params: [:], timeout: 0.05)
+        XCTAssertNil(data)
+        wait(for: [recovered], timeout: 0.5)
+    }
+
     func testServerStopAndRestartRecovers() throws {
         // restart() waits for the old process off the main thread and
         // completes via onRestart on the main queue; wait(for:) pumps the

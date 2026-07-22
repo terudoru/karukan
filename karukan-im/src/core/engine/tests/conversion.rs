@@ -463,6 +463,7 @@ fn commit_and_continue_advances_surrounding_context() {
         candidates,
         segments,
         active_segment: 0,
+        skip_learning: false,
     };
 
     let result = engine.process_key(&press('k'));

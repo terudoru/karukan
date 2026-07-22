@@ -186,7 +186,7 @@ SudachiDictの次回リリースを待たずに使いたい新語・固有名詞
 - 学習候補は変換時・入力中（auto-suggest）の両方で最大3件表示
 - スコアはrecency（最終使用日時）重視 + 頻度補正
 - 50文字（`max_surface_chars`）を超える変換結果は学習しない
-- 変換中に学習候補（📝）を選択して `Ctrl+Backspace`（macOSでは Ctrl+delete。`Ctrl+Delete` でも可）を押すと、そのエントリを学習履歴から削除できる。学習候補の選択中はフッターに「Ctrl+Backspaceで履歴から削除」と表示される
+- 変換中に学習候補（📝）を選択して `Ctrl+Shift+Delete`（通常のDeleteキーでもforward deleteでも可）を押すと、そのエントリを学習履歴から削除できる。`Ctrl+Delete` はmacOS標準どおり変換を取り消す。学習候補の選択中はフッターに削除ショートカットを表示する
 - IME切り替え・ウィンドウ切り替え時に自動保存（commit のたびには保存しない）
 - `[learning] enabled = false` で無効化可能
 - 学習履歴をすべて削除するには: `rm ~/.local/share/karukan-im/learning.tsv`

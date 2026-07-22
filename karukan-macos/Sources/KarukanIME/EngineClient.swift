@@ -9,6 +9,7 @@ import Foundation
 /// or fire-and-forget calls use the async API.
 class EngineClient {
     private let serverProcess: EngineProcess
+    private let timeoutRecovery: () -> Void
     private var nextID = 1
     private let requestQueue = DispatchQueue(label: "dev.togatoga.karukan.jsonrpc.request")
 
@@ -17,8 +18,22 @@ class EngineClient {
 
     /// `autoInit` re-sends `init` whenever the server (re)starts. Tests
     /// disable it to avoid loading models.
-    init(serverProcess: EngineProcess, autoInit: Bool = true) {
+    init(
+        serverProcess: EngineProcess,
+        autoInit: Bool = true,
+        timeoutRecovery: (() -> Void)? = nil
+    ) {
         self.serverProcess = serverProcess
+        self.timeoutRecovery = timeoutRecovery ?? {
+            // A timed-out request may still mutate the child engine after
+            // the frontend has let the key pass through. Replacing that
+            // process is the only reliable way to prevent split state.
+            if Thread.isMainThread {
+                serverProcess.restart()
+            } else {
+                DispatchQueue.main.async { serverProcess.restart() }
+            }
+        }
         self.serverProcess.onRestart = { [weak self] in
             self?.startReaderLoop()
             if autoInit {
@@ -65,6 +80,14 @@ class EngineClient {
 
     func commitSync() -> KeyResult? {
         keyResultSync(method: "commit", params: [:], timeout: 1.0)
+    }
+
+    func selectCandidateSync(pageIndex: Int) -> KeyResult? {
+        keyResultSync(
+            method: "select_candidate",
+            params: ["page_index": pageIndex],
+            timeout: 1.0
+        )
     }
 
     func saveLearningAsync() {
@@ -171,6 +194,7 @@ class EngineClient {
         if semaphore.wait(timeout: .now() + timeout) == .timedOut {
             NSLog("KarukanIME: \(method) timed out after \(timeout)s")
             takePending(id: id)?(nil)
+            timeoutRecovery()
             return nil
         }
         return result

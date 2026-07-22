@@ -3,9 +3,9 @@
 use super::*;
 
 /// Deletion hint appended to the conversion aux text while a learning-cache
-/// candidate is selected. Names Backspace rather than Delete because the Mac
-/// "delete" key is Backspace — one wording everywhere.
-pub(super) const LEARNING_DELETE_HINT: &str = "Ctrl+Backspaceで履歴から削除";
+/// candidate is selected. Both the Mac Delete key (Backspace keysym) and
+/// forward-delete keysym accept this chord.
+pub(super) const LEARNING_DELETE_HINT: &str = "Ctrl+Shift+Deleteで履歴から削除";
 
 impl InputMethodEngine {
     /// Build display text from the input buffer and romaji buffer

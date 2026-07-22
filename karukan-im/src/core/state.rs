@@ -39,6 +39,9 @@ pub enum InputState {
         segments: Vec<ConversionSegment>,
         /// Active segment index in `segments`.
         active_segment: usize,
+        /// Whether this conversion was started with the learning-free Tab
+        /// path. Clause navigation and resizing must preserve this choice.
+        skip_learning: bool,
     },
 }
 

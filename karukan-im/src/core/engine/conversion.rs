@@ -505,10 +505,24 @@ impl InputMethodEngine {
             return EngineResult::consumed();
         }
 
-        let initial_segments =
-            self.build_initial_conversion_segment(&reading, &prev_suggest_text, skip_learning);
+        // Decide clause boundaries before building candidates. Building a
+        // whole-reading candidate first and then rebuilding every clause
+        // performed N+1 sequential model calls on Space and could exceed the
+        // macOS frontend timeout for otherwise ordinary sentences.
+        let navigation_surface = if prev_suggest_text.is_empty() {
+            reading.as_str()
+        } else {
+            prev_suggest_text.as_str()
+        };
+        let navigation_segments =
+            self.build_navigation_segments(&reading, navigation_surface, skip_learning);
+        let segments = if navigation_segments.len() > 1 {
+            navigation_segments
+        } else {
+            self.build_initial_conversion_segment(&reading, &prev_suggest_text, skip_learning)
+        };
 
-        if initial_segments.is_empty() {
+        if segments.is_empty() {
             // No candidates, stay in hiragana mode
             let preedit = Preedit::with_text_underlined(&reading);
             self.state = InputState::Composing {
@@ -519,30 +533,19 @@ impl InputMethodEngine {
         }
 
         // macOS enters conversion with clause boundaries already present and
-        // the first clause focused. Previously Karukan kept the entire
-        // reading as one segment until the first Left/Right key, so that key
-        // both changed the segmentation and moved focus. Besides looking
-        // different, Shift+Left/Right then resized the wrong clause.
-        let current_surface = initial_segments[0]
-            .candidates
-            .selected_text()
-            .unwrap_or(&reading)
-            .to_string();
-        let navigation_segments = self.build_navigation_segments(&reading, &current_surface);
-        let segments = if navigation_segments.len() > 1 {
-            navigation_segments
-        } else {
-            initial_segments
-        };
-
-        self.enter_conversion_state(segments)
+        // the first clause focused.
+        self.enter_conversion_state(segments, skip_learning)
     }
 
     /// Transition to Conversion state with the given segments.
     ///
     /// Sets up the preedit (highlighted selected text), updates the state, and
     /// returns an EngineResult with preedit, candidates, and aux text actions.
-    fn enter_conversion_state(&mut self, segments: Vec<ConversionSegment>) -> EngineResult {
+    fn enter_conversion_state(
+        &mut self,
+        segments: Vec<ConversionSegment>,
+        skip_learning: bool,
+    ) -> EngineResult {
         let active_segment = 0;
         let candidates = segments[active_segment].candidates.clone();
         let preedit = Self::build_conversion_preedit_from_segments(&segments, active_segment);
@@ -553,6 +556,7 @@ impl InputMethodEngine {
             candidates: candidates.clone(),
             segments,
             active_segment,
+            skip_learning,
         };
 
         EngineResult::consumed()
@@ -915,6 +919,7 @@ impl InputMethodEngine {
         &mut self,
         reading: &str,
         current_surface: &str,
+        skip_learning: bool,
     ) -> Vec<ConversionSegment> {
         let aligned_spans = (!current_surface.is_empty() && current_surface != reading)
             .then(|| self.split_navigation_spans_aligned_to_surface(reading, current_surface))
@@ -941,8 +946,11 @@ impl InputMethodEngine {
                         .and_then(|surfaces| surfaces.get(idx))
                         .and_then(|surface| surface.as_deref())
                 });
-                let candidates =
-                    self.candidate_list_for_conversion_segment(&span.reading, preferred, false);
+                let candidates = self.candidate_list_for_conversion_segment(
+                    &span.reading,
+                    preferred,
+                    skip_learning,
+                );
                 (!candidates.is_empty()).then_some(ConversionSegment {
                     reading: span.reading,
                     candidates,
@@ -1257,19 +1265,24 @@ impl InputMethodEngine {
             Keysym::RIGHT => self.next_conversion_segment(),
             Keysym::PAGE_DOWN => self.next_candidate_page(),
             Keysym::PAGE_UP => self.prev_candidate_page(),
-            // Ctrl+Backspace / Ctrl+Delete: delete the selected learning
-            // candidate from the history. Backspace doubles as Delete because
-            // the Mac "delete" key is Backspace. On a non-learning selection
-            // the chord is consumed but does nothing, so it can't leak into
-            // the application mid-conversion.
+            // Keep macOS' Control+Delete conversion-cancel behavior. History
+            // deletion uses the explicitly extended Control+Shift+Delete
+            // chord so the standard shortcut is never shadowed.
             Keysym::DELETE | Keysym::BACKSPACE
-                if key.modifiers.control_key && !key.modifiers.alt_key =>
+                if key.modifiers.control_key
+                    && key.modifiers.shift_key
+                    && !key.modifiers.alt_key =>
             {
                 if self.selected_is_deletable() {
                     self.delete_selected_candidate_from_history()
                 } else {
                     EngineResult::consumed()
                 }
+            }
+            Keysym::DELETE | Keysym::BACKSPACE
+                if key.modifiers.control_key && !key.modifiers.alt_key =>
+            {
+                self.cancel_conversion()
             }
             Keysym::BACKSPACE => self.backspace_conversion(),
             _ => {
@@ -1440,7 +1453,7 @@ impl InputMethodEngine {
     }
 
     /// Delete the selected learning candidate from the history
-    /// (Ctrl+Backspace / Ctrl+Delete); the caller guards deletability
+    /// (Ctrl+Shift+Backspace / Ctrl+Shift+Delete); the caller guards deletability
     /// ([`Self::selected_is_deletable`]).
     ///
     /// Removes the entry and its prefix twins
@@ -1478,13 +1491,19 @@ impl InputMethodEngine {
         }
         debug!("deleted learning entry: {} -> {}", reading, surface);
 
-        let candidate_list = self.candidate_list_for_conversion_segment(&reading, None, false);
+        let skip_learning = match &self.state {
+            InputState::Conversion { skip_learning, .. } => *skip_learning,
+            _ => return EngineResult::consumed(),
+        };
+        let candidate_list =
+            self.candidate_list_for_conversion_segment(&reading, None, skip_learning);
         let (preedit, candidates) = {
             let InputState::Conversion {
                 preedit,
                 candidates,
                 segments,
                 active_segment,
+                ..
             } = &mut self.state
             else {
                 return EngineResult::consumed();
@@ -1545,6 +1564,7 @@ impl InputMethodEngine {
                 candidates,
                 segments,
                 active_segment,
+                ..
             } = &mut self.state
             else {
                 return EngineResult::not_consumed();
@@ -1595,7 +1615,12 @@ impl InputMethodEngine {
                 .map(|(text, _)| text)
                 .unwrap_or_default();
             let reading = self.input_buf.text.clone();
-            let new_segments = self.build_navigation_segments(&reading, &current_surface);
+            let skip_learning = match &self.state {
+                InputState::Conversion { skip_learning, .. } => *skip_learning,
+                _ => false,
+            };
+            let new_segments =
+                self.build_navigation_segments(&reading, &current_surface, skip_learning);
             if new_segments.len() > 1 {
                 let len = new_segments.len() as isize;
                 let active_segment = if delta >= 0 {
@@ -1612,6 +1637,7 @@ impl InputMethodEngine {
                     candidates: candidates.clone(),
                     segments: new_segments,
                     active_segment,
+                    skip_learning,
                 };
                 return self.conversion_update_result(preedit, candidates, &reading);
             }
@@ -1623,6 +1649,7 @@ impl InputMethodEngine {
                 candidates,
                 segments,
                 active_segment,
+                ..
             } = &mut self.state
             else {
                 return EngineResult::not_consumed();
@@ -1670,12 +1697,13 @@ impl InputMethodEngine {
     }
 
     fn resize_conversion_segment(&mut self, expand: bool) -> EngineResult {
-        let (mut segments, active_segment) = match &self.state {
+        let (mut segments, active_segment, skip_learning) = match &self.state {
             InputState::Conversion {
                 segments,
                 active_segment,
+                skip_learning,
                 ..
-            } => (segments.clone(), *active_segment),
+            } => (segments.clone(), *active_segment, *skip_learning),
             _ => return EngineResult::not_consumed(),
         };
 
@@ -1691,14 +1719,14 @@ impl InputMethodEngine {
             segments[active_segment].reading.push(moved);
             let active_reading = segments[active_segment].reading.clone();
             segments[active_segment].candidates =
-                self.candidate_list_for_conversion_segment(&active_reading, None, false);
+                self.candidate_list_for_conversion_segment(&active_reading, None, skip_learning);
 
             if next_reading.is_empty() {
                 segments.remove(active_segment + 1);
             } else {
                 segments[active_segment + 1].reading = next_reading.clone();
                 segments[active_segment + 1].candidates =
-                    self.candidate_list_for_conversion_segment(&next_reading, None, false);
+                    self.candidate_list_for_conversion_segment(&next_reading, None, skip_learning);
             }
         } else {
             let mut active_chars: Vec<char> = segments[active_segment].reading.chars().collect();
@@ -1709,17 +1737,17 @@ impl InputMethodEngine {
             let active_reading: String = active_chars.into_iter().collect();
             segments[active_segment].reading = active_reading.clone();
             segments[active_segment].candidates =
-                self.candidate_list_for_conversion_segment(&active_reading, None, false);
+                self.candidate_list_for_conversion_segment(&active_reading, None, skip_learning);
 
             if let Some(next_segment) = segments.get_mut(active_segment + 1) {
                 let next_reading = format!("{moved}{}", next_segment.reading);
                 next_segment.reading = next_reading.clone();
                 next_segment.candidates =
-                    self.candidate_list_for_conversion_segment(&next_reading, None, false);
+                    self.candidate_list_for_conversion_segment(&next_reading, None, skip_learning);
             } else {
                 let next_reading = moved.to_string();
                 let candidates =
-                    self.candidate_list_for_conversion_segment(&next_reading, None, false);
+                    self.candidate_list_for_conversion_segment(&next_reading, None, skip_learning);
                 segments.push(ConversionSegment {
                     reading: next_reading,
                     candidates,
@@ -1744,6 +1772,7 @@ impl InputMethodEngine {
             candidates: candidates.clone(),
             segments,
             active_segment,
+            skip_learning,
         };
         self.conversion_update_result(preedit, candidates, &reading)
     }

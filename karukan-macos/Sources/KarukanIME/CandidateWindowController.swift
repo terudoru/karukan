@@ -1,5 +1,47 @@
 import Cocoa
 
+func candidateIndexForDoubleClick(clickCount: Int, pageIndex: Int) -> Int? {
+    clickCount >= 2 ? pageIndex : nil
+}
+
+/// A candidate row receives mouse events without activating the floating
+/// panel, preserving keyboard focus in the client application.
+final class CandidateRowView: NSView {
+    let pageIndex: Int
+    var onDoubleClick: ((Int) -> Void)?
+
+    init(pageIndex: Int) {
+        self.pageIndex = pageIndex
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, alphaValue > 0, bounds.contains(point) else { return nil }
+        // Labels are presentation only; route the entire row to one click
+        // target so double-clicking directly on the candidate text works.
+        return self
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        handleClick(count: event.clickCount)
+    }
+
+    func handleClick(count: Int) {
+        guard
+            let index = candidateIndexForDoubleClick(
+                clickCount: count,
+                pageIndex: pageIndex
+            )
+        else { return }
+        onDoubleClick?(index)
+    }
+}
+
 /// Place a candidate panel on the display containing the composition cursor,
 /// flipping above when necessary and clamping both axes to the visible frame.
 /// Kept as a pure function so multi-display edge cases are unit-testable
@@ -50,6 +92,7 @@ class CandidateWindowController {
     private let panelBackgroundView: NSView
     private var rowViews: [NSView] = []
     private var auxText: String?
+    var onCandidateDoubleClick: ((Int) -> Void)?
 
     private struct PageState {
         let candidates: [CandidateItem]
@@ -70,7 +113,7 @@ class CandidateWindowController {
         panel.hidesOnDeactivate = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.ignoresMouseEvents = true
+        panel.ignoresMouseEvents = false
         panel.hasShadow = true
 
         panelBackgroundView = NSView()
@@ -169,7 +212,10 @@ class CandidateWindowController {
     }
 
     private func addCandidateRow(_ candidate: CandidateItem, number: Int, selected: Bool) {
-        let rowContainer = NSView()
+        let rowContainer = CandidateRowView(pageIndex: number - 1)
+        rowContainer.onDoubleClick = { [weak self] pageIndex in
+            self?.onCandidateDoubleClick?(pageIndex)
+        }
         rowContainer.translatesAutoresizingMaskIntoConstraints = false
         rowContainer.wantsLayer = true
         rowContainer.layer?.cornerRadius = 4

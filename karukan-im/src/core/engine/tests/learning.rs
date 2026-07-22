@@ -2,7 +2,7 @@
 //!
 //! Space/Down: include learning candidates (default conversion).
 //! Tab: skip learning candidates (lets users escape stale learned entries).
-//! Ctrl+Delete: delete the selected learning candidate from the history.
+//! Ctrl+Shift+Delete: delete the selected learning candidate from the history.
 
 use std::io::Write;
 
@@ -113,7 +113,58 @@ fn tab_key_skips_learning_in_composing() {
 }
 
 #[test]
-fn ctrl_delete_removes_selected_learning_entry() {
+fn tab_key_skips_learning_in_every_initial_clause() {
+    let mut engine = engine_with_learned("あい", "藍");
+    engine.learning.as_mut().unwrap().record("うえ", "上");
+    engine.learning.as_mut().unwrap().record("あいう", "愛雨");
+    engine.config.composing_chunk_len = 2;
+
+    for ch in ['a', 'i', 'u', 'e'] {
+        engine.process_key(&press(ch));
+    }
+    let result = engine.process_key(&press_key(Keysym::TAB));
+    assert!(result.consumed);
+
+    let InputState::Conversion {
+        segments,
+        skip_learning,
+        ..
+    } = engine.state()
+    else {
+        panic!("expected conversion state");
+    };
+    assert!(*skip_learning);
+    assert_eq!(segments.len(), 2);
+    assert!(segments.iter().all(|segment| {
+        segment
+            .candidates
+            .candidates()
+            .iter()
+            .all(|candidate| !candidate.is_deletable())
+    }));
+
+    engine.process_key(&press_shift_key(Keysym::RIGHT));
+    let InputState::Conversion {
+        segments,
+        skip_learning,
+        ..
+    } = engine.state()
+    else {
+        panic!("expected conversion state after resizing");
+    };
+    assert!(*skip_learning);
+    assert_eq!(segments[0].reading, "あいう");
+    assert!(
+        segments[0]
+            .candidates
+            .candidates()
+            .iter()
+            .all(|candidate| !candidate.is_deletable())
+    );
+}
+
+#[test]
+fn ctrl_shift_delete_removes_selected_learning_entry() {
     let mut engine = engine_with_learned("あい", "藍");
 
     engine.process_key(&press('a'));
@@ -136,7 +187,7 @@ fn ctrl_delete_removes_selected_learning_entry() {
         "learning candidate must be flagged"
     );
 
-    let result = engine.process_key(&press_ctrl(Keysym::DELETE));
+    let result = engine.process_key(&press_ctrl_shift(Keysym::DELETE));
     assert!(result.consumed);
     // The entry is gone from the cache...
     assert!(engine.learning.as_ref().unwrap().lookup("あい").is_empty());
@@ -175,7 +226,7 @@ fn ctrl_delete_removes_selected_learning_entry() {
 }
 
 #[test]
-fn ctrl_delete_removes_prefix_twins_so_surface_does_not_resurface() {
+fn ctrl_shift_delete_removes_prefix_twins_so_surface_does_not_resurface() {
     // The same surface learned under two prefix-related readings is shown as a
     // single deduped row; deleting it must clear both, or the twin under the
     // longer reading pops back on the next conversion of the same input.
@@ -196,7 +247,7 @@ fn ctrl_delete_removes_prefix_twins_so_surface_does_not_resurface() {
     assert_eq!(selected.text, "藍");
     assert!(selected.is_deletable());
 
-    engine.process_key(&press_ctrl(Keysym::DELETE));
+    engine.process_key(&press_ctrl_shift(Keysym::DELETE));
     // Both the exact and the prefix entry are gone.
     assert!(engine.learning.as_ref().unwrap().lookup("あい").is_empty());
     assert!(
@@ -211,7 +262,7 @@ fn ctrl_delete_removes_prefix_twins_so_surface_does_not_resurface() {
 }
 
 #[test]
-fn ctrl_delete_keeps_surface_that_another_source_also_produces() {
+fn ctrl_shift_delete_keeps_surface_that_another_source_also_produces() {
     // #2 regression: the learned surface equals the hiragana reading, which
     // the fallback ALWAYS produces. That fallback copy is deduped away under
     // the learning entry; deleting the entry must bring it back (now
@@ -233,7 +284,7 @@ fn ctrl_delete_keeps_surface_that_another_source_also_produces() {
     assert_eq!(selected.text, "あい");
     assert!(selected.is_deletable());
 
-    engine.process_key(&press_ctrl(Keysym::DELETE));
+    engine.process_key(&press_ctrl_shift(Keysym::DELETE));
     assert!(engine.learning.as_ref().unwrap().lookup("あい").is_empty());
 
     // `あい` survives as an ordinary fallback candidate.
@@ -276,28 +327,24 @@ fn init_learning_cache_applies_configured_surface_cap() {
 }
 
 #[test]
-fn ctrl_backspace_deletes_learning_entry_like_ctrl_delete() {
-    // Mac keyboards label the Backspace key "delete", so the natural macOS
-    // chord is Ctrl+delete = Ctrl+Backspace; it must behave like Ctrl+Delete
-    // (forward delete), not like the plain-Backspace cancel.
+fn ctrl_shift_backspace_deletes_learning_entry_like_ctrl_shift_delete() {
+    // Mac keyboards label the Backspace key "delete", so both keysyms must
+    // support the extended history-deletion chord.
     let mut engine = engine_with_learned("あい", "藍");
 
     engine.process_key(&press('a'));
     engine.process_key(&press('i'));
     engine.process_key(&press_key(Keysym::SPACE));
 
-    let result = engine.process_key(&press_ctrl(Keysym::BACKSPACE));
+    let result = engine.process_key(&press_ctrl_shift(Keysym::BACKSPACE));
     assert!(result.consumed);
     assert!(engine.learning.as_ref().unwrap().lookup("あい").is_empty());
     assert!(matches!(engine.state(), InputState::Conversion { .. }));
 }
 
 #[test]
-fn ctrl_backspace_does_nothing_for_non_learning_candidate() {
-    // When the selection isn't a learning candidate, Ctrl+Backspace (like
-    // Ctrl+Delete) is consumed so it can't leak to the app mid-conversion,
-    // but the conversion is left intact. Cancelling stays on plain
-    // Backspace / Escape.
+fn ctrl_shift_backspace_does_nothing_for_non_learning_candidate() {
+    // The extended history-deletion chord stays inert on ordinary candidates.
     let mut engine = engine_with_learned("あい", "藍");
 
     engine.process_key(&press('a'));
@@ -308,14 +355,14 @@ fn ctrl_backspace_does_nothing_for_non_learning_candidate() {
     let before = engine.state().candidates().unwrap().clone();
     assert!(!before.selected().unwrap().is_deletable());
 
-    let result = engine.process_key(&press_ctrl(Keysym::BACKSPACE));
+    let result = engine.process_key(&press_ctrl_shift(Keysym::BACKSPACE));
     assert!(
         result.consumed,
         "the chord must be consumed, not leak to the app"
     );
     assert!(
         matches!(engine.state(), InputState::Conversion { .. }),
-        "Ctrl+Backspace must not cancel when the selection isn't deletable"
+        "Ctrl+Shift+Backspace must not cancel when the selection isn't deletable"
     );
     // Nothing changed: same selection, same list, history intact.
     let after = engine.state().candidates().unwrap();
@@ -389,7 +436,7 @@ fn plain_backspace_still_cancels_conversion() {
 }
 
 #[test]
-fn ctrl_delete_ignores_non_learning_candidate() {
+fn ctrl_delete_cancels_conversion_and_preserves_history() {
     let mut engine = engine_with_learned("あい", "藍");
 
     engine.process_key(&press('a'));
@@ -407,18 +454,14 @@ fn ctrl_delete_ignores_non_learning_candidate() {
         .clone();
     assert!(!selected.is_deletable());
 
-    let before_len = engine.state().candidates().unwrap().len();
     let result = engine.process_key(&press_ctrl(Keysym::DELETE));
-    // The key is consumed (it must not leak to the app mid-conversion) but
-    // nothing is deleted and the conversion continues.
     assert!(result.consumed);
-    assert!(matches!(engine.state(), InputState::Conversion { .. }));
-    assert_eq!(engine.state().candidates().unwrap().len(), before_len);
+    assert!(matches!(engine.state(), InputState::Composing { .. }));
     assert!(!engine.learning.as_ref().unwrap().lookup("あい").is_empty());
 }
 
 #[test]
-fn ctrl_delete_removes_prefix_matched_entry_by_full_reading() {
+fn ctrl_shift_delete_removes_prefix_matched_entry_by_full_reading() {
     // A prefix-matched learning candidate carries its own (longer) reading;
     // deletion must remove the cache entry under that full reading.
     let mut engine = engine_with_learned("あいさつ", "挨拶");
@@ -438,7 +481,7 @@ fn ctrl_delete_removes_prefix_matched_entry_by_full_reading() {
     assert_eq!(selected.reading.as_deref(), Some("あいさつ"));
     assert!(selected.is_deletable());
 
-    engine.process_key(&press_ctrl(Keysym::DELETE));
+    engine.process_key(&press_ctrl_shift(Keysym::DELETE));
     assert!(
         engine
             .learning

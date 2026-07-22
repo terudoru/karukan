@@ -37,7 +37,7 @@ impl CandidateSource {
     }
 
     /// Whether candidates from this source can be removed from the learning
-    /// history with Ctrl+Backspace / Ctrl+Delete.
+    /// history with Ctrl+Shift+Backspace / Ctrl+Shift+Delete.
     pub fn is_deletable(&self) -> bool {
         matches!(self, CandidateSource::Learning)
     }
@@ -84,7 +84,7 @@ impl Candidate {
     }
 
     /// Whether this candidate can be removed from the learning history with
-    /// Ctrl+Backspace / Ctrl+Delete. See [`CandidateSource::is_deletable`].
+    /// Ctrl+Shift+Backspace / Ctrl+Shift+Delete. See [`CandidateSource::is_deletable`].
     pub fn is_deletable(&self) -> bool {
         self.source.is_some_and(|s| s.is_deletable())
     }

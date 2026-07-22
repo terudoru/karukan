@@ -4,6 +4,20 @@ import XCTest
 @testable import KarukanIME
 
 final class CandidateWindowTests: XCTestCase {
+    func testOnlyDoubleClickSelectsCandidate() {
+        XCTAssertNil(candidateIndexForDoubleClick(clickCount: 1, pageIndex: 3))
+        XCTAssertEqual(candidateIndexForDoubleClick(clickCount: 2, pageIndex: 3), 3)
+        XCTAssertEqual(candidateIndexForDoubleClick(clickCount: 3, pageIndex: 3), 3)
+
+        let row = CandidateRowView(pageIndex: 3)
+        var selectedIndex: Int?
+        row.onDoubleClick = { selectedIndex = $0 }
+        row.handleClick(count: 1)
+        XCTAssertNil(selectedIndex)
+        row.handleClick(count: 2)
+        XCTAssertEqual(selectedIndex, 3)
+    }
+
     func testPanelClampsToRightEdge() {
         let frame = candidatePanelFrame(
             cursorRect: NSRect(x: 950, y: 500, width: 2, height: 20),
