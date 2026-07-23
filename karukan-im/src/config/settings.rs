@@ -55,6 +55,10 @@ pub struct ConversionSettings {
     /// for long input; each chunk's left context is the converted text of the
     /// preceding chunks.
     pub composing_chunk_len: usize,
+    /// Maximum reading length for one deferred live-conversion call. Deferred
+    /// frontends run inference after the synchronous key callback, so they can
+    /// preserve a longer linguistic context without delaying every key.
+    pub deferred_composing_chunk_len: usize,
     /// Path to dictionary binary file (optional, defaults to data_dir/dict.bin)
     pub dict_path: Option<String>,
     /// Model variant id (optional, defaults to registry default)

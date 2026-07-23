@@ -134,6 +134,7 @@ fn deferred_live_refresh_is_inert_after_composition_ends() {
 fn deferred_long_refresh_resolves_only_one_neural_chunk_per_request() {
     let mut engine = make_live_conversion_engine();
     engine.config.composing_chunk_len = 2;
+    engine.config.deferred_composing_chunk_len = 2;
     engine.init_kanji_converter().unwrap();
     engine.process_key_deferred_live(&press('a'));
     engine.input_buf.clear();
@@ -164,6 +165,7 @@ fn deferred_long_refresh_resolves_only_one_neural_chunk_per_request() {
 fn deferred_refresh_waits_for_async_model_without_completing_raw_chunks() {
     let mut engine = make_live_conversion_engine();
     engine.config.composing_chunk_len = 2;
+    engine.config.deferred_composing_chunk_len = 2;
     engine.process_key_deferred_live(&press('a'));
     engine.input_buf.clear();
     engine.input_buf.insert("あいうえ");
@@ -175,6 +177,25 @@ fn deferred_refresh_waits_for_async_model_without_completing_raw_chunks() {
     assert!(result.needs_live_refresh);
     assert!(engine.chunks.iter().all(|chunk| !chunk.resolved));
     assert!(engine.converters.kanji.is_none());
+}
+
+#[test]
+fn deferred_report_length_text_keeps_one_neural_context() {
+    let mut engine = make_live_conversion_engine();
+    let reading = "にゅうりょくをつづけているとほんらいひらがながはいるべきところにどうおんのすうじがはいってしまうまたえんたーをおしてかくていしないままちょうぶんをにゅうりょくしたときぶんのながさがながくなるほどへんかんせいどがおちる";
+    assert_eq!(reading.chars().count(), 108);
+    engine.process_key_deferred_live(&press('a'));
+    engine.input_buf.clear();
+    engine.input_buf.insert(reading);
+    let (_sender, receiver) = std::sync::mpsc::channel();
+    engine.resource_initialization = Some(receiver);
+
+    let result = engine.refresh_live_conversion();
+
+    assert!(result.needs_live_refresh);
+    assert_eq!(engine.chunks.len(), 1);
+    assert_eq!(engine.chunks[0].reading, reading);
+    assert!(!engine.chunks[0].resolved);
 }
 
 #[test]

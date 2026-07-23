@@ -199,6 +199,17 @@ fn suspicious_auto_conversion(reading: &str, converted: &str) -> bool {
         return true;
     }
 
+    // Live conversion must not invent a numeric spelling for a kana-only
+    // reading. Short readings such as `さん` and `はち` are valid Japanese
+    // words as well as number pronunciations, and both bundled models can
+    // greedily return `3` / `8` without enough context. A user who typed
+    // digits directly keeps them in a non-Japanese pass-through chunk, while
+    // an intentional spoken-number conversion remains available after Space.
+    // User-dictionary replacements bypass this heuristic as well.
+    if converted.chars().any(char::is_numeric) {
+        return true;
+    }
+
     let mut total = 0usize;
     let mut katakana = 0usize;
     let mut kanji = 0usize;
@@ -1900,13 +1911,15 @@ mod conservative_auto_conversion_tests {
     }
 
     #[test]
-    fn accepts_japanese_and_numeric_surfaces() {
+    fn accepts_japanese_surfaces_but_rejects_invented_digits() {
         assert!(!suspicious_auto_conversion("あい", "愛"));
         assert!(!suspicious_auto_conversion(
             "ぷろぐらむしょぞく",
             "プログラム所属"
         ));
-        assert!(!suspicious_auto_conversion(
+        assert!(suspicious_auto_conversion("さん", "3"));
+        assert!(suspicious_auto_conversion("はち", "８"));
+        assert!(suspicious_auto_conversion(
             "にせんにじゅうろくねん",
             "2026年"
         ));

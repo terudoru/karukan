@@ -81,6 +81,10 @@ pub struct EngineConfig {
     /// live-conversion latency stays bounded for long input. See
     /// [`ComposingChunk`] and `chunked_auto_suggest`.
     pub composing_chunk_len: usize,
+    /// Maximum reading length for one deferred live-conversion call. This is
+    /// separate from `composing_chunk_len` because deferred frontends can use
+    /// a longer context without putting inference inside the key callback.
+    pub deferred_composing_chunk_len: usize,
     /// Token count threshold for beam search (at or below → beam, above → greedy)
     pub short_input_threshold: usize,
     /// Beam width for short input
@@ -107,6 +111,7 @@ impl EngineConfig {
                 0
             },
             composing_chunk_len: settings.conversion.composing_chunk_len,
+            deferred_composing_chunk_len: settings.conversion.deferred_composing_chunk_len,
             short_input_threshold: settings.conversion.short_input_threshold,
             beam_width: settings.conversion.beam_width,
             max_latency_ms: settings.conversion.max_latency_ms,
@@ -123,6 +128,7 @@ impl Default for EngineConfig {
             display_context_len: 10,
             max_api_context_len: 10,
             composing_chunk_len: 30,
+            deferred_composing_chunk_len: 120,
             short_input_threshold: 10,
             beam_width: 3,
             max_latency_ms: 100,
