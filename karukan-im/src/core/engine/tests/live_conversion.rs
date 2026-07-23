@@ -56,7 +56,7 @@ fn deferred_live_conversion_returns_kana_before_refresh() {
 }
 
 #[test]
-fn deferred_append_keeps_converted_prefix_stable_until_refresh() {
+fn deferred_append_shows_exact_reading_until_refresh() {
     let mut engine = make_live_conversion_engine();
     engine.dicts.user = Some(user_dict_with("あい", "愛"));
 
@@ -73,13 +73,13 @@ fn deferred_append_keeps_converted_prefix_stable_until_refresh() {
             None
         }
     });
-    assert_eq!(immediate_text, Some("愛う"));
-    assert_eq!(engine.live.text, "愛う");
+    assert_eq!(immediate_text, Some("あいう"));
+    assert!(engine.live.text.is_empty());
     assert_eq!(engine.chunks[0].reading, "あい");
 }
 
 #[test]
-fn deferred_partial_romaji_keeps_converted_prefix_visible() {
+fn deferred_partial_romaji_shows_exact_input_until_refresh() {
     let mut engine = make_live_conversion_engine();
     engine.dicts.user = Some(user_dict_with("あい", "愛"));
 
@@ -95,7 +95,8 @@ fn deferred_partial_romaji_keeps_converted_prefix_visible() {
             None
         }
     });
-    assert_eq!(immediate_text, Some("愛k"));
+    assert_eq!(immediate_text, Some("あいk"));
+    assert!(engine.live.text.is_empty());
 }
 
 #[test]
