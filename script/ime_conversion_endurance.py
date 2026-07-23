@@ -23,6 +23,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import random
 import selectors
 import signal
 import statistics
@@ -49,7 +50,7 @@ OSS_BEHAVIOR_REFERENCES = (
     {
         "project": "libskk",
         "url": "https://github.com/ueno/libskk",
-        "behavior": "key-sequence interaction tests and re-conversion",
+        "behavior": "timed key-sequence interaction tests and re-conversion",
     },
     {
         "project": "librime",
@@ -58,6 +59,7 @@ OSS_BEHAVIOR_REFERENCES = (
     },
 )
 
+KEY_BACKSPACE = 0xFF08
 KEY_RETURN = 0xFF0D
 KEY_ESCAPE = 0xFF1B
 KEY_LEFT = 0xFF51
@@ -70,6 +72,15 @@ class Case:
     category: str
     segments: tuple[str, ...]
     expected: tuple[str, ...] = ()
+
+
+@dataclasses.dataclass(frozen=True)
+class NaturalInputConfig:
+    seed: int
+    key_delay_ms: tuple[float, float]
+    segment_pause_ms: tuple[float, float]
+    sentence_pause_ms: tuple[float, float]
+    correction_rate: float
 
 
 CASES = (
@@ -265,6 +276,54 @@ CASES = (
         ("purojekuto", "no", "sukeju-ru", "wo", "appude-to", "shi", "masu"),
         ("プロジェクトのスケジュールをアップデートします",),
     ),
+    Case(
+        "email_request",
+        "natural",
+        (
+            "osewa", "ni", "natte", "ori", "masu", ".", "shiryou", "wo",
+            "soufu", "shi", "masu", "node", ",", "go", "kakuninn", "kudasai", ".",
+        ),
+        ("お世話になっております。資料を送付しますので、ご確認ください。",),
+    ),
+    Case(
+        "casual_lunch",
+        "natural",
+        ("kyou", "no", "ohiru", "ha", "gakkou", "no", "chikaku", "de", "tabe", "you"),
+        ("今日のお昼は学校の近くで食べよう",),
+    ),
+    Case(
+        "reschedule",
+        "natural",
+        (
+            "raishuu", "no", "kaigi", "wo", "mokuyoubi", "no", "gogo", "ni",
+            "hennkou", "deki", "masu", "ka",
+        ),
+        ("来週の会議を木曜日の午後に変更できますか",),
+    ),
+    Case(
+        "research_note",
+        "natural",
+        (
+            "jikkenn", "de", "eta", "de-ta", "wo", "seiri", "shi", ",",
+            "gosa", "no", "genninn", "wo", "kousatsu", "shi", "mashita",
+        ),
+        ("実験で得たデータを整理し、誤差の原因を考察しました",),
+    ),
+    Case(
+        "double_check",
+        "natural",
+        (
+            "nenn", "no", "tame", ",", "settei", "naiyou", "ni", "machigai",
+            "ga", "nai", "ka", "mou", "ichido", "kakuninn", "shi", "masu",
+        ),
+        ("念のため、設定内容に間違いがないかもう一度確認します",),
+    ),
+    Case(
+        "late_reply",
+        "natural",
+        ("hensinn", "ga", "osoku", "nari", ",", "moushiwake", "ari", "mase", "nn"),
+        ("返信が遅くなり、申し訳ありません",),
+    ),
 )
 
 
@@ -273,6 +332,11 @@ class RpcClient:
         self.server = server
         self.timeout = timeout
         self.next_id = 1
+        server_env = os.environ.copy()
+        # Quality loops must not train on their synthetic sentences or modify
+        # the user's real learning cache while testing an installed server.
+        server_env["KARUKAN_DISABLE_LEARNING"] = "1"
+        server_env["KARUKAN_DISABLE_DICTIONARY_UPDATE"] = "1"
         self.proc = subprocess.Popen(
             [str(server)],
             stdin=subprocess.PIPE,
@@ -280,6 +344,7 @@ class RpcClient:
             stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
+            env=server_env,
         )
         assert self.proc.stdout is not None
         self.selector = selectors.DefaultSelector()
@@ -365,15 +430,27 @@ def percentile(values: list[float], fraction: float) -> float:
 
 
 class EnduranceLoop:
-    def __init__(self, client: RpcClient, duration: float, report_path: Path) -> None:
+    def __init__(
+        self,
+        client: RpcClient,
+        duration: float,
+        report_path: Path,
+        natural_input: NaturalInputConfig | None = None,
+    ) -> None:
         self.client = client
         self.duration = duration
         self.report_path = report_path
+        self.natural_input = natural_input
+        self.rng = random.Random(natural_input.seed if natural_input else 0)
         self.started_wall = dt.datetime.now(dt.timezone.utc)
         self.started = time.monotonic()
         self.stop_requested = False
         self.case_runs = 0
         self.probe_runs = 0
+        self.natural_commits = 0
+        self.corrections = 0
+        self.simulated_pause_seconds = 0.0
+        self.document_context = ""
         self.key_events = 0
         self.refreshes = 0
         self.rpc_errors = 0
@@ -390,6 +467,14 @@ class EnduranceLoop:
     def start_clock(self) -> None:
         self.started_wall = dt.datetime.now(dt.timezone.utc)
         self.started = time.monotonic()
+
+    def sleep_bounded_ms(self, delay_range: tuple[float, float]) -> None:
+        delay = self.rng.uniform(*delay_range) / 1000
+        remaining = max(0.0, self.duration - self.elapsed())
+        actual = min(delay, remaining)
+        if actual > 0:
+            time.sleep(actual)
+            self.simulated_pause_seconds += actual
 
     def add_anomaly(
         self,
@@ -504,6 +589,127 @@ class EnduranceLoop:
         self.outputs[case.name][final_converted] += 1
         self.case_runs += 1
         self.inspect_surface(case, final_raw, final_converted)
+
+    def run_natural_case(self, case: Case) -> None:
+        assert self.natural_input is not None
+        self.request("reset")
+        self.request(
+            "set_surrounding_text",
+            {
+                "text": self.document_context,
+                "cursor_pos": len(self.document_context),
+            },
+        )
+        previous_raw = ""
+        previous_converted = ""
+        final_raw = ""
+        final_converted = ""
+
+        for segment_index, segment in enumerate(case.segments):
+            first_immediate: str | None = None
+            correct_this_segment = (
+                bool(segment)
+                and self.rng.random() < self.natural_input.correction_rate
+            )
+            for char_index, char in enumerate(segment):
+                result = self.press(ord(char))
+                if not result.get("consumed", False):
+                    self.add_anomaly(
+                        "unconsumed_key",
+                        case,
+                        final_raw,
+                        final_converted,
+                        f"segment {segment_index}, char {char_index}: {char!r}",
+                        "critical",
+                    )
+                immediate = last_preedit(result)
+                if immediate is not None:
+                    final_raw = immediate
+                    if first_immediate is None:
+                        first_immediate = immediate
+                self.sleep_bounded_ms(self.natural_input.key_delay_ms)
+                if result.get("needs_live_refresh", False):
+                    final_converted = self.refresh_until_settled(case, final_raw)
+
+                if correct_this_segment and char_index == 0:
+                    before_typo = final_raw
+                    wrong = self.rng.choice(("x", "z", "q"))
+                    typo_result = self.press(ord(wrong))
+                    typo_raw = last_preedit(typo_result) or before_typo
+                    self.sleep_bounded_ms(self.natural_input.key_delay_ms)
+                    if typo_result.get("needs_live_refresh", False):
+                        self.refresh_until_settled(case, typo_raw)
+                    restore_result = self.press(KEY_BACKSPACE)
+                    restored = last_preedit(restore_result)
+                    self.corrections += 1
+                    if restored != before_typo:
+                        self.add_anomaly(
+                            "backspace_did_not_restore",
+                            case,
+                            before_typo,
+                            restored or "",
+                            (
+                                f"typed accidental {wrong!r} after segment "
+                                f"{segment_index}, then Backspace"
+                            ),
+                            "critical",
+                        )
+                    final_raw = restored if restored is not None else before_typo
+                    self.sleep_bounded_ms(self.natural_input.key_delay_ms)
+                    if restore_result.get("needs_live_refresh", False):
+                        final_converted = self.refresh_until_settled(case, final_raw)
+
+            previous_has_pending_romaji = (
+                bool(previous_raw)
+                and previous_raw[-1].isascii()
+                and previous_raw[-1].isalpha()
+            )
+            if (
+                previous_raw
+                and first_immediate is not None
+                and not previous_has_pending_romaji
+                and not first_immediate.startswith(previous_raw)
+            ):
+                self.add_anomaly(
+                    "immediate_prefix_changed",
+                    case,
+                    previous_raw,
+                    first_immediate,
+                    (
+                        "the first naturally timed key after a live refresh did not "
+                        f"preserve the exact raw reading; prior conversion was "
+                        f"{previous_converted!r}"
+                    ),
+                    "critical",
+                )
+
+            final_converted = self.refresh_until_settled(case, final_raw)
+            previous_raw = final_raw
+            previous_converted = final_converted
+            self.sleep_bounded_ms(self.natural_input.segment_pause_ms)
+
+        self.outputs[case.name][final_converted] += 1
+        self.case_runs += 1
+        self.inspect_surface(case, final_raw, final_converted)
+
+        result = self.press(KEY_RETURN)
+        committed = last_commit(result)
+        if committed != final_converted:
+            self.add_anomaly(
+                "natural_commit_surface_mismatch",
+                case,
+                final_raw,
+                final_converted,
+                f"visible surface {final_converted!r}, committed text {committed!r}",
+                "critical",
+            )
+        if committed:
+            separator = "" if committed[-1] in "。！？!?." else "。"
+            self.document_context = (
+                self.document_context + committed + separator
+            )[-240:]
+            self.natural_commits += 1
+        self.sleep_bounded_ms(self.natural_input.sentence_pause_ms)
 
     def compose(self, case: Case) -> tuple[str, str]:
         self.request("reset")
@@ -759,10 +965,16 @@ class EnduranceLoop:
         cycle = 0
         while not self.stop_requested and self.elapsed() < self.duration:
             cycle += 1
-            for case in CASES:
+            cases = list(CASES)
+            if self.natural_input is not None:
+                self.rng.shuffle(cases)
+            for case in cases:
                 if self.stop_requested or self.elapsed() >= self.duration:
                     break
-                self.run_case(case)
+                if self.natural_input is None:
+                    self.run_case(case)
+                else:
+                    self.run_natural_case(case)
                 if self.elapsed() - last_progress >= 10:
                     last_progress = self.elapsed()
                     critical = sum(
@@ -772,10 +984,12 @@ class EnduranceLoop:
                         "PROGRESS "
                         f"elapsed={self.elapsed():.1f}s cycles={cycle} cases={self.case_runs} "
                         f"keys={self.key_events} refreshes={self.refreshes} "
+                        f"corrections={self.corrections} "
                         f"critical_unique={critical} anomalies_unique={len(self.anomalies)}",
                         flush=True,
                     )
-            self.run_behavior_probes()
+            if self.natural_input is None:
+                self.run_behavior_probes()
 
     def report(self) -> dict[str, Any]:
         elapsed = self.elapsed()
@@ -793,6 +1007,11 @@ class EnduranceLoop:
             "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "requested_duration_seconds": self.duration,
             "elapsed_seconds": round(elapsed, 3),
+            "input_simulation": (
+                dataclasses.asdict(self.natural_input)
+                if self.natural_input is not None
+                else None
+            ),
             "oss_behavior_references": OSS_BEHAVIOR_REFERENCES,
             "server": str(self.client.server),
             "server_sha256": hashlib.sha256(self.client.server.read_bytes()).hexdigest(),
@@ -800,6 +1019,8 @@ class EnduranceLoop:
                 "cases": len(CASES),
                 "case_runs": self.case_runs,
                 "behavior_probe_runs": self.probe_runs,
+                "natural_commits": self.natural_commits,
+                "simulated_corrections": self.corrections,
                 "key_events": self.key_events,
                 "refreshes": self.refreshes,
                 "rpc_errors": self.rpc_errors,
@@ -808,6 +1029,7 @@ class EnduranceLoop:
                     1 for event in events if event["severity"] == "critical"
                 ),
             },
+            "simulated_pause_seconds": round(self.simulated_pause_seconds, 3),
             "latency_ms": {
                 "rpc_median": round(statistics.median(self.latencies), 3)
                 if self.latencies
@@ -843,6 +1065,9 @@ class EnduranceLoop:
             f"- Duration: {report['elapsed_seconds']:.3f} seconds",
             f"- Cases: {report['counts']['cases']} kinds / {report['counts']['case_runs']} runs",
             f"- OSS-inspired behavior probes: {report['counts']['behavior_probe_runs']} runs",
+            f"- Natural commits: {report['counts']['natural_commits']}",
+            f"- Simulated corrections: {report['counts']['simulated_corrections']}",
+            f"- Simulated typing/pause time: {report['simulated_pause_seconds']:.3f} seconds",
             f"- Key events: {report['counts']['key_events']}",
             f"- Deferred refreshes: {report['counts']['refreshes']}",
             f"- RPC errors: {report['counts']['rpc_errors']}",
@@ -893,10 +1118,51 @@ def wait_for_initialization(client: RpcClient) -> dict[str, Any]:
     return status
 
 
+def millisecond_range(value: str) -> tuple[float, float]:
+    try:
+        low_text, high_text = value.split(":", maxsplit=1)
+        low = float(low_text)
+        high = float(high_text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "expected MIN:MAX milliseconds"
+        ) from error
+    if low < 0 or high < low:
+        raise argparse.ArgumentTypeError(
+            "milliseconds must satisfy 0 <= MIN <= MAX"
+        )
+    return (low, high)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--duration-seconds", type=float, default=3000.0)
     parser.add_argument("--server", type=Path, default=DEFAULT_SERVER)
+    parser.add_argument(
+        "--natural-input",
+        action="store_true",
+        help="simulate human-paced typing, corrections, commits, and editor context",
+    )
+    parser.add_argument("--seed", type=int, default=20260723)
+    parser.add_argument(
+        "--key-delay-ms",
+        type=millisecond_range,
+        default=millisecond_range("45:140"),
+        metavar="MIN:MAX",
+    )
+    parser.add_argument(
+        "--segment-pause-ms",
+        type=millisecond_range,
+        default=millisecond_range("120:450"),
+        metavar="MIN:MAX",
+    )
+    parser.add_argument(
+        "--sentence-pause-ms",
+        type=millisecond_range,
+        default=millisecond_range("300:1000"),
+        metavar="MIN:MAX",
+    )
+    parser.add_argument("--correction-rate", type=float, default=0.12)
     parser.add_argument(
         "--report-path", type=Path, default=Path("/tmp/karukan-ime-endurance.json")
     )
@@ -907,11 +1173,29 @@ def main() -> int:
     args = parse_args()
     if args.duration_seconds <= 0:
         raise SystemExit("--duration-seconds must be positive")
+    if not 0 <= args.correction_rate <= 1:
+        raise SystemExit("--correction-rate must be between 0 and 1")
     if not args.server.is_file() or not os.access(args.server, os.X_OK):
         raise SystemExit(f"server is not executable: {args.server}")
 
     client = RpcClient(args.server)
-    loop = EnduranceLoop(client, args.duration_seconds, args.report_path)
+    natural_input = (
+        NaturalInputConfig(
+            seed=args.seed,
+            key_delay_ms=args.key_delay_ms,
+            segment_pause_ms=args.segment_pause_ms,
+            sentence_pause_ms=args.sentence_pause_ms,
+            correction_rate=args.correction_rate,
+        )
+        if args.natural_input
+        else None
+    )
+    loop = EnduranceLoop(
+        client,
+        args.duration_seconds,
+        args.report_path,
+        natural_input=natural_input,
+    )
 
     def request_stop(_signum: int, _frame: Any) -> None:
         loop.stop_requested = True

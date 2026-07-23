@@ -26,6 +26,10 @@ fn threads_label(n_threads: u32) -> String {
     }
 }
 
+fn learning_enabled(settings: &Settings) -> bool {
+    settings.learning.enabled && std::env::var_os("KARUKAN_DISABLE_LEARNING").is_none()
+}
+
 impl InputMethodEngine {
     /// Full engine initialization from user settings: system dictionary,
     /// user dictionaries, learning cache, and conversion models according
@@ -53,7 +57,7 @@ impl InputMethodEngine {
             return Ok(());
         }
 
-        let learning_enabled = settings.learning.enabled;
+        let learning_enabled = learning_enabled(settings);
         let learning_config = learning_enabled.then_some(LearningConfig {
             max_entries: settings.learning.max_entries,
             max_surface_chars: settings.learning.max_surface_chars,
@@ -85,7 +89,7 @@ impl InputMethodEngine {
         self.dictionary_update = spawn_background_update(settings);
         self.init_user_dictionaries();
         self.init_learning_cache(
-            settings.learning.enabled,
+            learning_enabled(settings),
             LearningConfig {
                 max_entries: settings.learning.max_entries,
                 max_surface_chars: settings.learning.max_surface_chars,

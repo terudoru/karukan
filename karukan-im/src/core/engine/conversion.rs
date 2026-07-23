@@ -213,7 +213,7 @@ fn suspicious_auto_conversion(reading: &str, converted: &str) -> bool {
     // Polite inflection tails are not lexical conversion candidates. Preserve
     // them exactly instead of accepting a same-sound dictionary name or
     // katakana spelling (`つかいます -> 使い魔す`, `です -> デス`).
-    if ["ました", "ます", "です"]
+    if ["ください", "ません", "ました", "ます", "です"]
         .into_iter()
         .any(|suffix| reading.ends_with(suffix) && !converted.ends_with(suffix))
     {
@@ -236,6 +236,41 @@ fn suspicious_auto_conversion(reading: &str, converted: &str) -> bool {
     // failure mode we want to suppress is a long sentence broken into several
     // katakana fragments around kanji, e.g. `ニイガタ第ガクコウ学部...`.
     kanji > 0 && has_multiple_katakana_runs(converted) && katakana * 3 >= total
+}
+
+/// Prefer the standard hiragana spelling for an auxiliary verb during
+/// automatic conversion. Explicit conversion still exposes the model and
+/// dictionary candidates, but live conversion should produce prose that does
+/// not require a style-only correction (`ご確認下さい` -> `ご確認ください`).
+fn naturalize_auto_surface(reading: &str, converted: &str) -> String {
+    let mut surface = converted.to_string();
+
+    if reading.contains("ください") {
+        surface = surface.replace("下さい", "ください");
+    }
+
+    // These replacements require both an unambiguous reading context and the
+    // known-wrong model surface. This keeps live conversion stable when the
+    // preceding document context biases a homophone, without rewriting an
+    // intentional standalone word.
+    const CONTEXTUAL_REWRITES: [(&str, &str, &str); 5] = [
+        ("はしをわた", "箸を渡", "橋を渡"),
+        ("あまいあめをなめ", "甘い雨を舐め", "甘い飴をなめ"),
+        (
+            "しろいかみにもじをか",
+            "白い髪に文字を書",
+            "白い紙に文字を書",
+        ),
+        ("かみをみじかくき", "紙を短く切", "髪を短く切"),
+        ("けさははやくおき", "今朝は早く置き", "今朝は早く起き"),
+    ];
+    for (reading_context, wrong, natural) in CONTEXTUAL_REWRITES {
+        if reading.contains(reading_context) {
+            surface = surface.replace(wrong, natural);
+        }
+    }
+
+    surface
 }
 
 fn safe_dictionary_rescue_candidate<'a>(
@@ -485,7 +520,7 @@ impl InputMethodEngine {
         let chars: Vec<char> = reading.chars().collect();
         let mut text = String::new();
         let mut converted_reading_chars = 0usize;
-        let protected_suffix_start = ["ました", "ます", "です"]
+        let protected_suffix_start = ["ください", "ません", "ました", "ます", "です"]
             .into_iter()
             .find(|suffix| reading.ends_with(suffix))
             .map(|suffix| chars.len() - suffix.chars().count());
@@ -1161,6 +1196,7 @@ impl InputMethodEngine {
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| span.reading.clone());
+            let text = naturalize_auto_surface(&span.reading, &text);
             let rescued = self.system_dictionary_rescue(&span.reading);
             if suspicious_auto_conversion(&span.reading, &text) || text == span.reading {
                 converted.push_str(rescued.as_deref().unwrap_or(&span.reading));
@@ -2162,7 +2198,65 @@ mod conservative_auto_conversion_tests {
         ));
         assert!(suspicious_auto_conversion("つかいます", "使い魔す"));
         assert!(suspicious_auto_conversion("です", "デス"));
+        assert!(suspicious_auto_conversion(
+            "ごかくにんください",
+            "ご確認下さい"
+        ));
+        assert!(suspicious_auto_conversion(
+            "もうしわけありません",
+            "申し訳あり厩栓"
+        ));
         assert!(!suspicious_auto_conversion("つかいます", "使います"));
+    }
+
+    #[test]
+    fn naturalizes_kudasai_auxiliary_in_automatic_surface() {
+        assert_eq!(
+            naturalize_auto_surface("ごかくにんください", "ご確認下さい"),
+            "ご確認ください"
+        );
+        assert_eq!(
+            naturalize_auto_surface("くだものをください", "果物を下さい"),
+            "果物をください"
+        );
+        assert_eq!(
+            naturalize_auto_surface("したをみる", "下を見る"),
+            "下を見る"
+        );
+    }
+
+    #[test]
+    fn naturalizes_contextually_unambiguous_homophones() {
+        let cases = [
+            (
+                "はしをわたってえきへいきます",
+                "箸を渡って駅へ行きます",
+                "橋を渡って駅へ行きます",
+            ),
+            (
+                "あまいあめをなめます",
+                "甘い雨を舐めます",
+                "甘い飴をなめます",
+            ),
+            (
+                "しろいかみにもじをかきます",
+                "白い髪に文字を書きます",
+                "白い紙に文字を書きます",
+            ),
+            (
+                "かみをみじかくきりました",
+                "紙を短く切りました",
+                "髪を短く切りました",
+            ),
+            (
+                "けさははやくおきました",
+                "今朝は早く置きました",
+                "今朝は早く起きました",
+            ),
+        ];
+        for (reading, converted, expected) in cases {
+            assert_eq!(naturalize_auto_surface(reading, converted), expected);
+        }
     }
 
     #[test]

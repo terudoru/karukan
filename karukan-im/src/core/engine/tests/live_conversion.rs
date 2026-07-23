@@ -100,6 +100,32 @@ fn deferred_partial_romaji_shows_exact_input_until_refresh() {
 }
 
 #[test]
+fn deferred_typo_backspace_restores_pending_romaji() {
+    let mut engine = make_live_conversion_engine();
+
+    for ch in "kyoun".chars() {
+        engine.process_key_deferred_live(&press(ch));
+    }
+    assert_eq!(engine.preedit().unwrap().text(), "きょうn");
+
+    engine.process_key_deferred_live(&press('q'));
+    assert_eq!(engine.preedit().unwrap().text(), "きょうんq");
+
+    let restored = engine.process_key_deferred_live(&press_key(Keysym::BACKSPACE));
+    let restored_text = restored.actions.iter().find_map(|action| {
+        if let EngineAction::UpdatePreedit(preedit) = action {
+            Some(preedit.text())
+        } else {
+            None
+        }
+    });
+    assert_eq!(restored_text, Some("きょうn"));
+
+    engine.process_key_deferred_live(&press('o'));
+    assert_eq!(engine.preedit().unwrap().text(), "きょうの");
+}
+
+#[test]
 fn deferred_non_append_edit_falls_back_to_unsliced_reading() {
     let mut engine = make_live_conversion_engine();
     engine.dicts.user = Some(user_dict_with("あい", "愛"));

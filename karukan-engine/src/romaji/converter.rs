@@ -29,6 +29,10 @@ pub struct RomajiConverter {
     trie: TrieNode,
     buffer: String,
     output: String,
+    /// State before each raw key. When an invalid continuation makes a
+    /// pending consonant pass through (`s` + typo `x`), Backspace can restore
+    /// the pending `s` instead of leaving literal ASCII in the composition.
+    history: Vec<(String, usize)>,
 }
 
 impl RomajiConverter {
@@ -38,19 +42,28 @@ impl RomajiConverter {
             trie: build_rules(),
             buffer: String::new(),
             output: String::new(),
+            history: Vec::new(),
         }
     }
 
     /// Push a character and attempt conversion
     pub fn push(&mut self, ch: char) -> ConversionEvent {
+        self.history.push((self.buffer.clone(), self.output.len()));
+
         // Handle uppercase by converting to lowercase
         let ch = ch.to_ascii_lowercase();
 
         // Add to buffer
         self.buffer.push(ch);
 
-        // Try to convert
-        self.try_convert()
+        // Once a romaji sequence is complete, output-only Backspace operates
+        // on the composed kana and no raw-key snapshots are needed. Keeping
+        // history only while a sequence is pending also bounds its memory.
+        let event = self.try_convert();
+        if self.buffer.is_empty() {
+            self.history.clear();
+        }
+        event
     }
 
     /// Convert with the given hiragana and recursively process any remaining buffer.
@@ -213,14 +226,25 @@ impl RomajiConverter {
             }
         }
 
+        self.history.clear();
         result
     }
 
     /// Handle backspace
     pub fn backspace(&mut self) -> BackspaceResult {
-        if let Some(ch) = self.buffer.pop() {
+        if let Some(ch) = self.buffer.chars().last()
+            && let Some((buffer, output_len)) = self.history.pop()
+        {
+            self.buffer = buffer;
+            self.output.truncate(output_len);
+            BackspaceResult::RemovedBuffer(ch)
+        } else if let Some(ch) = self.buffer.pop() {
             BackspaceResult::RemovedBuffer(ch)
         } else if let Some(ch) = self.output.pop() {
+            // Output-only deletion is performed after the raw sequence has
+            // already become a composed character. Its earlier keystroke
+            // snapshots no longer describe the visible input buffer.
+            self.history.clear();
             BackspaceResult::RemovedOutput(ch)
         } else {
             BackspaceResult::Empty
@@ -241,6 +265,7 @@ impl RomajiConverter {
     pub fn reset(&mut self) {
         self.buffer.clear();
         self.output.clear();
+        self.history.clear();
     }
 }
 
@@ -366,6 +391,41 @@ mod tests {
 
         let result = conv.backspace();
         assert_eq!(result, BackspaceResult::RemovedOutput('か'));
+    }
+
+    #[test]
+    fn backspace_restores_pending_consonant_after_invalid_continuation() {
+        let mut conv = RomajiConverter::new();
+        conv.push('s');
+        conv.push('x');
+        assert_eq!(conv.output(), "s");
+        assert_eq!(conv.buffer(), "x");
+
+        let result = conv.backspace();
+        assert_eq!(result, BackspaceResult::RemovedBuffer('x'));
+        assert_eq!(conv.output(), "");
+        assert_eq!(conv.buffer(), "s");
+
+        conv.push('e');
+        assert_eq!(conv.output(), "せ");
+        assert_eq!(conv.buffer(), "");
+    }
+
+    #[test]
+    fn backspace_restores_pending_n_after_invalid_continuation() {
+        let mut conv = RomajiConverter::new();
+        conv.push('n');
+        conv.push('q');
+        assert_eq!(conv.output(), "ん");
+        assert_eq!(conv.buffer(), "q");
+
+        conv.backspace();
+        assert_eq!(conv.output(), "");
+        assert_eq!(conv.buffer(), "n");
+
+        conv.push('o');
+        assert_eq!(conv.output(), "の");
+        assert_eq!(conv.buffer(), "");
     }
 
     #[test]

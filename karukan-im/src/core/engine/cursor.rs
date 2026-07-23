@@ -23,7 +23,18 @@ impl InputMethodEngine {
     pub(super) fn backspace_composing(&mut self) -> EngineResult {
         // If romaji buffer is not empty, backspace from buffer (not from composed text)
         if !self.converters.romaji.buffer().is_empty() {
+            let output_len_before = self.converters.romaji.output().chars().count();
             self.converters.romaji.backspace();
+            let output_len_after = self.converters.romaji.output().chars().count();
+            // An invalid continuation can finalize a pending consonant as
+            // literal output (`s` + typo `x` -> `s`, buffer `x`). The romaji
+            // converter restores its pre-key snapshot on Backspace; mirror
+            // any reverted output in the composed input buffer so continuing
+            // with `e` produces `せ`, not `sえ`.
+            for _ in output_len_after..output_len_before {
+                self.input_buf.remove_char_before_cursor();
+            }
+            self.live.text.clear();
             if let Some(result) = self.try_reset_if_empty() {
                 return result;
             }
