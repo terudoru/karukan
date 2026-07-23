@@ -210,6 +210,16 @@ fn suspicious_auto_conversion(reading: &str, converted: &str) -> bool {
         return true;
     }
 
+    // Polite inflection tails are not lexical conversion candidates. Preserve
+    // them exactly instead of accepting a same-sound dictionary name or
+    // katakana spelling (`つかいます -> 使い魔す`, `です -> デス`).
+    if ["ました", "ます", "です"]
+        .into_iter()
+        .any(|suffix| reading.ends_with(suffix) && !converted.ends_with(suffix))
+    {
+        return true;
+    }
+
     let mut total = 0usize;
     let mut katakana = 0usize;
     let mut kanji = 0usize;
@@ -226,6 +236,86 @@ fn suspicious_auto_conversion(reading: &str, converted: &str) -> bool {
     // failure mode we want to suppress is a long sentence broken into several
     // katakana fragments around kanji, e.g. `ニイガタ第ガクコウ学部...`.
     kanji > 0 && has_multiple_katakana_runs(converted) && katakana * 3 >= total
+}
+
+fn safe_dictionary_rescue_candidate<'a>(
+    reading: &str,
+    candidates: &'a [karukan_engine::DictCandidate],
+) -> Option<(&'a karukan_engine::DictCandidate, f32)> {
+    let reading_len = reading.chars().count();
+    let raw_score = candidates
+        .iter()
+        .find(|candidate| candidate.surface == reading)
+        .map(|candidate| candidate.score);
+    let best_kanji = candidates.iter().find(|candidate| {
+        candidate.surface != reading
+            && candidate.surface.chars().any(is_kanji_char)
+            && !candidate
+                .surface
+                .chars()
+                .any(|ch| ch.is_ascii_alphabetic() || ch.is_numeric())
+    });
+
+    if let Some(candidate) = best_kanji {
+        let kanji_candidate_count = candidates
+            .iter()
+            .filter(|other| {
+                other.surface != reading
+                    && other.surface.chars().any(is_kanji_char)
+                    && !other
+                        .surface
+                        .chars()
+                        .any(|ch| ch.is_ascii_alphabetic() || ch.is_numeric())
+            })
+            .count();
+        let unambiguous_short_reading = reading_len >= 3
+            && candidates
+                .iter()
+                .filter(|other| {
+                    other.surface != reading && other.surface.chars().any(is_kanji_char)
+                })
+                .nth(1)
+                .is_none_or(|other| candidate.score + 500.0 < other.score);
+        let confidence_gain = if let Some(score) = raw_score {
+            score - candidate.score
+        } else if reading_len >= 4 && kanji_candidate_count == 1 && candidate.score <= 15_000.0 {
+            15_000.0 - candidate.score
+        } else {
+            0.0
+        };
+        if confidence_gain > 500.0 && (reading_len >= 4 || unambiguous_short_reading) {
+            return Some((candidate, confidence_gain));
+        }
+    }
+
+    // Script conversion is safe for dictionary entries that clearly describe
+    // a loanword: either the reading contains a prolonged sound mark or the
+    // same entry also exposes a Latin spelling. This avoids changing ordinary
+    // words such as `きっと` to katakana merely because a katakana candidate
+    // exists.
+    let looks_like_loanword = reading.contains('ー')
+        || candidates
+            .iter()
+            .any(|candidate| candidate.surface.chars().any(|ch| ch.is_ascii_alphabetic()));
+    let has_short_latin_spelling = candidates.iter().any(|candidate| {
+        candidate.surface.chars().count() <= 4
+            && candidate.surface.chars().all(|ch| ch.is_ascii_lowercase())
+    });
+    if looks_like_loanword
+        && let Some(candidate) = candidates.iter().find(|candidate| {
+            candidate.surface != reading
+                && karukan_engine::is_pure_full_katakana(&candidate.surface)
+        })
+        && (reading_len >= 3
+            || (reading_len == 2 && candidate.score < 3_000.0 && has_short_latin_spelling))
+    {
+        return Some((
+            candidate,
+            (10_000.0 - candidate.score).max(500.0) + reading_len as f32 * 100.0,
+        ));
+    }
+
+    None
 }
 
 fn split_surface_by_reading_lengths(surface: &str, spans: &[ReadingSpan]) -> Vec<Option<String>> {
@@ -385,6 +475,127 @@ impl CandidateBuilder {
 }
 
 impl InputMethodEngine {
+    /// Recover a conservative dictionary surface when the live model returns
+    /// the entire reading unchanged. The system dictionary is not treated as
+    /// a user-fixed span: this fallback runs only after model inference has
+    /// explicitly declined the whole chunk, and only high-confidence kanji or
+    /// loanword entries are eligible.
+    fn system_dictionary_rescue(&self, reading: &str) -> Option<String> {
+        let dictionary = self.dicts.system.as_ref()?;
+        let chars: Vec<char> = reading.chars().collect();
+        let mut text = String::new();
+        let mut converted_reading_chars = 0usize;
+        let protected_suffix_start = ["ました", "ます", "です"]
+            .into_iter()
+            .find(|suffix| reading.ends_with(suffix))
+            .map(|suffix| chars.len() - suffix.chars().count());
+        let mut index = 0usize;
+        while index < chars.len() {
+            if protected_suffix_start.is_some_and(|start| index >= start) {
+                text.push(chars[index]);
+                index += 1;
+                continue;
+            }
+            let suffix: String = chars[index..].iter().collect();
+            let normalized = suffix.contains('お').then(|| suffix.replace('お', "ー"));
+            let mut best: Option<(usize, f32, &str)> = None;
+            for lookup_input in std::iter::once(suffix.as_str()).chain(normalized.as_deref()) {
+                for entry in dictionary.common_prefix_search(lookup_input) {
+                    let reading_len = entry.reading.chars().count();
+                    if reading_len == 0 || index + reading_len > chars.len() {
+                        continue;
+                    }
+                    if protected_suffix_start
+                        .is_some_and(|start| index < start && index + reading_len > start)
+                    {
+                        continue;
+                    }
+                    let Some((candidate, confidence_gain)) =
+                        safe_dictionary_rescue_candidate(entry.reading, entry.candidates)
+                    else {
+                        continue;
+                    };
+
+                    if best.as_ref().is_none_or(|(best_len, best_gain, _)| {
+                        reading_len > *best_len
+                            || (reading_len == *best_len && confidence_gain > *best_gain)
+                    }) {
+                        best = Some((reading_len, confidence_gain, candidate.surface.as_str()));
+                    }
+                }
+            }
+            if let Some((reading_len, _, surface)) = best {
+                text.push_str(surface);
+                converted_reading_chars += reading_len;
+                index += reading_len;
+            } else {
+                text.push(chars[index]);
+                index += 1;
+            }
+        }
+
+        (converted_reading_chars > 0 && text != reading).then_some(text)
+    }
+
+    /// Correct a narrow class of low-ranked model choices without replacing
+    /// context-sensitive homophones. If the model selected one kanji where
+    /// the same dictionary reading strongly prefers a longer kanji surface
+    /// (`きょう -> 京` versus `今日`), use the better-ranked complete form.
+    fn improve_incomplete_dictionary_surface(
+        &self,
+        reading: &str,
+        surface: &str,
+    ) -> Option<String> {
+        let dictionary = self.dicts.system.as_ref()?;
+        let spans = self.split_navigation_spans_aligned_to_surface(reading, surface)?;
+        let mut improved = String::new();
+        let mut changed = false;
+
+        for span in spans {
+            let Some(current) = span.fixed_surface.as_deref() else {
+                if let Some(rescued) = self.system_dictionary_rescue(&span.reading) {
+                    improved.push_str(&rescued);
+                    changed = true;
+                } else {
+                    improved.push_str(&span.reading);
+                }
+                continue;
+            };
+            if current == span.reading
+                && let Some(rescued) = self.system_dictionary_rescue(&span.reading)
+                && rescued.chars().any(is_kanji_char)
+            {
+                improved.push_str(&rescued);
+                changed = true;
+                continue;
+            }
+            let replacement = (current.chars().count() == 1 && current.chars().all(is_kanji_char))
+                .then(|| dictionary.exact_match_search(&span.reading))
+                .flatten()
+                .and_then(|entry| {
+                    let current_candidate = entry
+                        .candidates
+                        .iter()
+                        .find(|candidate| candidate.surface == current)?;
+                    let best = entry.candidates.iter().find(|candidate| {
+                        candidate.surface.chars().count() > 1
+                            && candidate.surface.chars().all(is_kanji_char)
+                    })?;
+                    (best.score + 1_500.0 < current_candidate.score)
+                        .then_some(best.surface.as_str())
+                });
+
+            if let Some(replacement) = replacement {
+                improved.push_str(replacement);
+                changed = true;
+            } else {
+                improved.push_str(current);
+            }
+        }
+
+        changed.then_some(improved)
+    }
+
     /// Run kana-kanji conversion for a reading via llama.cpp model.
     ///
     /// Determines the conversion strategy (main model, light model, or parallel beam),
@@ -950,10 +1161,15 @@ impl InputMethodEngine {
                 .into_iter()
                 .next()
                 .unwrap_or_else(|| span.reading.clone());
-            if suspicious_auto_conversion(&span.reading, &text) {
-                converted.push_str(&span.reading);
+            let rescued = self.system_dictionary_rescue(&span.reading);
+            if suspicious_auto_conversion(&span.reading, &text) || text == span.reading {
+                converted.push_str(rescued.as_deref().unwrap_or(&span.reading));
             } else {
-                converted.push_str(&text);
+                converted.push_str(
+                    self.improve_incomplete_dictionary_surface(&span.reading, &text)
+                        .as_deref()
+                        .unwrap_or(&text),
+                );
             }
         }
         converted
@@ -1902,7 +2118,28 @@ impl InputMethodEngine {
 
 #[cfg(test)]
 mod conservative_auto_conversion_tests {
-    use super::suspicious_auto_conversion;
+    use super::*;
+    use karukan_engine::Dictionary;
+    use std::io::Write;
+
+    fn dictionary(entries: &[(&str, &[(&str, f32)])]) -> Dictionary {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        let entries = entries
+            .iter()
+            .map(|(reading, candidates)| {
+                let candidates = candidates
+                    .iter()
+                    .map(|(surface, score)| format!(r#"{{"surface":"{surface}","score":{score}}}"#))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(r#"{{"reading":"{reading}","candidates":[{candidates}]}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        write!(tmp, "[{entries}]").unwrap();
+        tmp.flush().unwrap();
+        Dictionary::build_from_json(tmp.path()).unwrap()
+    }
 
     #[test]
     fn rejects_latin_hallucinations_for_hiragana_readings() {
@@ -1923,5 +2160,110 @@ mod conservative_auto_conversion_tests {
             "にせんにじゅうろくねん",
             "2026年"
         ));
+        assert!(suspicious_auto_conversion("つかいます", "使い魔す"));
+        assert!(suspicious_auto_conversion("です", "デス"));
+        assert!(!suspicious_auto_conversion("つかいます", "使います"));
+    }
+
+    #[test]
+    fn identity_model_output_uses_high_confidence_dictionary_words() {
+        let mut engine = InputMethodEngine::new();
+        engine.dicts.system = Some(dictionary(&[
+            (
+                "あたらしい",
+                &[
+                    ("新しい", 100.0),
+                    ("新らしい", 1_500.0),
+                    ("あたらしい", 3_000.0),
+                ],
+            ),
+            (
+                "そふとうぇあ",
+                &[("ソフトウェア", 100.0), ("Software", 200.0)],
+            ),
+            (
+                "いんすとーる",
+                &[("インストール", 100.0), ("install", 200.0)],
+            ),
+            ("しました", &[("島下", 9_770.0), ("嶋下", 10_000.0)]),
+        ]));
+
+        assert_eq!(
+            engine.system_dictionary_rescue("あたらしいそふとうぇあをいんすとおるしました"),
+            Some("新しいソフトウェアをインストールしました".to_string())
+        );
+    }
+
+    #[test]
+    fn identity_rescue_does_not_extend_a_word_into_a_noisy_longer_entry() {
+        let mut engine = InputMethodEngine::new();
+        engine.dicts.system = Some(dictionary(&[
+            ("さいきどう", &[("再起動", 11_219.0)]),
+            ("さいきどうし", &[("再帰動詞", 18_116.0)]),
+            ("しました", &[("島下", 9_770.0), ("嶋下", 10_000.0)]),
+            (
+                "つかい",
+                &[("使い", 4_497.0), ("遣い", 6_545.0), ("つかい", 7_307.0)],
+            ),
+            ("います", &[("魔す", 9_787.0), ("います", 11_996.0)]),
+        ]));
+
+        assert_eq!(
+            engine.system_dictionary_rescue("さいきどうしました"),
+            Some("再起動しました".to_string())
+        );
+        assert_eq!(
+            engine.system_dictionary_rescue("つかいます"),
+            Some("使います".to_string())
+        );
+    }
+
+    #[test]
+    fn identity_model_output_keeps_short_homophones_for_context_conversion() {
+        let mut engine = InputMethodEngine::new();
+        engine.dicts.system = Some(dictionary(&[
+            ("はし", &[("橋", 100.0), ("箸", 110.0), ("はし", 3_000.0)]),
+            (
+                "です",
+                &[("デス", 100.0), ("death", 200.0), ("です", 3_000.0)],
+            ),
+            ("ろぐ", &[("ログ", 100.0), ("log", 200.0)]),
+        ]));
+
+        assert_eq!(engine.system_dictionary_rescue("はし"), None);
+        assert_eq!(engine.system_dictionary_rescue("です"), None);
+        assert_eq!(
+            engine.system_dictionary_rescue("ろぐ"),
+            Some("ログ".to_string())
+        );
+    }
+
+    #[test]
+    fn low_ranked_single_kanji_is_completed_without_changing_homophones() {
+        let mut engine = InputMethodEngine::new();
+        engine.dicts.system = Some(dictionary(&[
+            ("きょう", &[("今日", 100.0), ("京", 2_000.0)]),
+            ("だいがく", &[("大学", 100.0)]),
+            (
+                "わたし",
+                &[("私", 100.0), ("渡し", 1_000.0), ("わたし", 3_000.0)],
+            ),
+            ("はし", &[("箸", 100.0), ("橋", 2_000.0)]),
+            ("かみ", &[("カ申", 100.0), ("紙", 2_000.0)]),
+        ]));
+
+        assert_eq!(
+            engine
+                .improve_incomplete_dictionary_surface("わたしはきょうだいがく", "わたしは京大学"),
+            Some("私は今日大学".to_string())
+        );
+        assert_eq!(
+            engine.improve_incomplete_dictionary_surface("はし", "橋"),
+            None
+        );
+        assert_eq!(
+            engine.improve_incomplete_dictionary_surface("かみ", "紙"),
+            None
+        );
     }
 }
