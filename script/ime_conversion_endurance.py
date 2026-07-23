@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""Run a timed semantic/live-conversion endurance loop against karukan-imserver."""
+"""Run a timed semantic/live-conversion improvement loop against karukan-imserver.
+
+The interaction probes mirror state invariants used by other open-source IMEs:
+
+- Mozc keeps composition, suggestion/prediction, and conversion as distinct
+  states instead of treating a prediction as committed input.
+- libskk tests explicit conversion as a sequence of key operations and supports
+  re-conversion.
+- Rime keeps raw input/caret state separate from the rendered composition and
+  can reopen a selected segment for editing.
+
+Primary references are recorded in each JSON report so a regression can be
+traced back to the behavior that motivated its probe.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +36,32 @@ from typing import Any
 DEFAULT_SERVER = Path.home() / (
     "Library/Input Methods/Karukan.app/Contents/MacOS/karukan-imserver"
 )
+
+OSS_BEHAVIOR_REFERENCES = (
+    {
+        "project": "Mozc",
+        "url": (
+            "https://chromium.googlesource.com/external/mozc/src/+/master/"
+            "session/session_converter.cc"
+        ),
+        "behavior": "separate composition, suggestion/prediction, and conversion states",
+    },
+    {
+        "project": "libskk",
+        "url": "https://github.com/ueno/libskk",
+        "behavior": "key-sequence interaction tests and re-conversion",
+    },
+    {
+        "project": "librime",
+        "url": "https://github.com/rime/librime/blob/master/src/rime/context.cc",
+        "behavior": "raw input and caret remain separate from editable composition",
+    },
+)
+
+KEY_RETURN = 0xFF0D
+KEY_ESCAPE = 0xFF1B
+KEY_LEFT = 0xFF51
+KEY_SPACE = 0x0020
 
 
 @dataclasses.dataclass(frozen=True)
@@ -293,6 +332,30 @@ def last_preedit(result: dict[str, Any]) -> str | None:
     return values[-1] if values else None
 
 
+def last_preedit_state(result: dict[str, Any]) -> tuple[str, int] | None:
+    values = [
+        (action["text"], action["caret"])
+        for action in result.get("actions", [])
+        if action.get("type") == "update_preedit"
+    ]
+    return values[-1] if values else None
+
+
+def last_commit(result: dict[str, Any]) -> str | None:
+    values = [
+        action["text"]
+        for action in result.get("actions", [])
+        if action.get("type") == "commit"
+    ]
+    return values[-1] if values else None
+
+
+def has_action(result: dict[str, Any], action_type: str) -> bool:
+    return any(
+        action.get("type") == action_type for action in result.get("actions", [])
+    )
+
+
 def percentile(values: list[float], fraction: float) -> float:
     if not values:
         return 0.0
@@ -310,6 +373,7 @@ class EnduranceLoop:
         self.started = time.monotonic()
         self.stop_requested = False
         self.case_runs = 0
+        self.probe_runs = 0
         self.key_events = 0
         self.refreshes = 0
         self.rpc_errors = 0
@@ -367,6 +431,11 @@ class EnduranceLoop:
         self.latencies.append((time.monotonic() - before) * 1000)
         return result
 
+    def press(self, keysym: int) -> dict[str, Any]:
+        result = self.request("process_key", {"keysym": keysym})
+        self.key_events += 1
+        return result
+
     def refresh_until_settled(self, case: Case, raw: str) -> str:
         converted = raw
         for _ in range(32):
@@ -397,8 +466,7 @@ class EnduranceLoop:
         for segment_index, segment in enumerate(case.segments):
             first_immediate: str | None = None
             for char_index, char in enumerate(segment):
-                result = self.request("process_key", {"keysym": ord(char)})
-                self.key_events += 1
+                result = self.press(ord(char))
                 if not result.get("consumed", False):
                     self.add_anomaly(
                         "unconsumed_key",
@@ -436,6 +504,177 @@ class EnduranceLoop:
         self.outputs[case.name][final_converted] += 1
         self.case_runs += 1
         self.inspect_surface(case, final_raw, final_converted)
+
+    def compose(self, case: Case) -> tuple[str, str]:
+        self.request("reset")
+        raw = ""
+        converted = ""
+        for segment in case.segments:
+            for char in segment:
+                result = self.press(ord(char))
+                raw = last_preedit(result) or raw
+            converted = self.refresh_until_settled(case, raw)
+        return raw, converted
+
+    def probe_commit_matches_surface(self, case: Case) -> None:
+        raw, converted = self.compose(case)
+        result = self.press(KEY_RETURN)
+        committed = last_commit(result)
+        status = self.request("status")
+        if committed != converted:
+            self.add_anomaly(
+                "commit_surface_mismatch",
+                case,
+                raw,
+                converted,
+                f"visible surface {converted!r}, committed text {committed!r}",
+                "critical",
+            )
+        if status.get("state") != "empty":
+            self.add_anomaly(
+                "commit_state_not_empty",
+                case,
+                raw,
+                converted,
+                f"state after Return: {status.get('state')!r}",
+                "critical",
+            )
+        if not has_action(result, "hide_candidates"):
+            self.add_anomaly(
+                "commit_kept_candidates",
+                case,
+                raw,
+                converted,
+                "Return did not emit hide_candidates",
+                "critical",
+            )
+        self.probe_runs += 1
+
+    def probe_cancel_and_reconvert(self, case: Case) -> None:
+        raw, converted = self.compose(case)
+        result = self.press(KEY_ESCAPE)
+        restored = last_preedit(result)
+        status = self.request("status")
+        if restored != raw or status.get("state") != "composing":
+            self.add_anomaly(
+                "cancel_did_not_restore_reading",
+                case,
+                raw,
+                converted,
+                f"Escape produced {restored!r} in state {status.get('state')!r}",
+                "critical",
+            )
+            self.probe_runs += 1
+            return
+
+        result = self.press(KEY_SPACE)
+        status = self.request("status")
+        if status.get("state") != "conversion" or not has_action(
+            result, "show_candidates"
+        ):
+            self.add_anomaly(
+                "explicit_reconversion_unavailable",
+                case,
+                raw,
+                converted,
+                (
+                    f"Space produced state {status.get('state')!r}; "
+                    f"show_candidates={has_action(result, 'show_candidates')}"
+                ),
+                "critical",
+            )
+        result = self.press(KEY_ESCAPE)
+        reopened = last_preedit(result)
+        status = self.request("status")
+        if reopened != raw or status.get("state") != "composing":
+            self.add_anomaly(
+                "reconversion_cancel_lost_reading",
+                case,
+                raw,
+                converted,
+                f"Escape produced {reopened!r} in state {status.get('state')!r}",
+                "critical",
+            )
+        self.probe_runs += 1
+
+    def probe_caret_edit(self, case: Case) -> None:
+        raw, converted = self.compose(case)
+        result = self.press(KEY_LEFT)
+        state = last_preedit_state(result)
+        expected_caret = max(0, len(raw) - 1)
+        if state != (raw, expected_caret):
+            self.add_anomaly(
+                "caret_move_changed_reading",
+                case,
+                raw,
+                converted,
+                f"Left produced {state!r}, expected {(raw, expected_caret)!r}",
+                "critical",
+            )
+            self.probe_runs += 1
+            return
+
+        result = self.press(ord("i"))
+        edited = last_preedit_state(result)
+        expected = raw[:expected_caret] + "い" + raw[expected_caret:]
+        if edited != (expected, expected_caret + 1):
+            self.add_anomaly(
+                "caret_insert_changed_reading",
+                case,
+                raw,
+                edited[0] if edited else "",
+                f"middle insert produced {edited!r}, expected {(expected, expected_caret + 1)!r}",
+                "critical",
+            )
+        self.probe_runs += 1
+
+    def probe_context_isolation(self, case: Case) -> None:
+        contexts = (
+            ("川に架かる", 5),
+            ("食事に使う", 5),
+        )
+        for context, cursor in contexts:
+            self.request("reset")
+            self.request(
+                "set_surrounding_text",
+                {"text": context, "cursor_pos": cursor},
+            )
+            raw = ""
+            for segment in case.segments:
+                for char in segment:
+                    result = self.press(ord(char))
+                    raw = last_preedit(result) or raw
+            converted = self.refresh_until_settled(case, raw)
+            if context in converted or converted.startswith(context):
+                self.add_anomaly(
+                    "surrounding_context_leaked",
+                    case,
+                    raw,
+                    converted,
+                    f"surrounding text {context!r} appeared in preedit",
+                    "critical",
+                )
+            self.inspect_surface(case, raw, converted)
+        self.request("set_surrounding_text", {"text": "", "cursor_pos": 0})
+        self.probe_runs += 1
+
+    def run_behavior_probes(self) -> None:
+        probes = (
+            (self.probe_commit_matches_surface, CASES[0]),
+            (self.probe_cancel_and_reconvert, CASES[8]),
+            (
+                self.probe_caret_edit,
+                Case("caret_middle_insert", "editing", ("a", "u")),
+            ),
+            (
+                self.probe_context_isolation,
+                Case("context_homophone", "context", ("hashi",)),
+            ),
+        )
+        for probe, case in probes:
+            if self.stop_requested or self.elapsed() >= self.duration:
+                return
+            probe(case)
 
     def inspect_surface(self, case: Case, raw: str, converted: str) -> None:
         if not converted:
@@ -504,13 +743,14 @@ class EnduranceLoop:
                 "review",
             )
 
-        if len(self.outputs[case.name]) > 1:
+        case_outputs = self.outputs.get(case.name)
+        if case_outputs is not None and len(case_outputs) > 1:
             self.add_anomaly(
                 "nondeterministic_surface",
                 case,
                 raw,
                 converted,
-                f"observed surfaces: {sorted(self.outputs[case.name])!r}",
+                f"observed surfaces: {sorted(case_outputs)!r}",
                 "review",
             )
 
@@ -535,6 +775,7 @@ class EnduranceLoop:
                         f"critical_unique={critical} anomalies_unique={len(self.anomalies)}",
                         flush=True,
                     )
+            self.run_behavior_probes()
 
     def report(self) -> dict[str, Any]:
         elapsed = self.elapsed()
@@ -552,11 +793,13 @@ class EnduranceLoop:
             "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "requested_duration_seconds": self.duration,
             "elapsed_seconds": round(elapsed, 3),
+            "oss_behavior_references": OSS_BEHAVIOR_REFERENCES,
             "server": str(self.client.server),
             "server_sha256": hashlib.sha256(self.client.server.read_bytes()).hexdigest(),
             "counts": {
                 "cases": len(CASES),
                 "case_runs": self.case_runs,
+                "behavior_probe_runs": self.probe_runs,
                 "key_events": self.key_events,
                 "refreshes": self.refreshes,
                 "rpc_errors": self.rpc_errors,
@@ -595,10 +838,11 @@ class EnduranceLoop:
         )
         markdown_path = self.report_path.with_suffix(".md")
         lines = [
-            "# Karukan conversion endurance report",
+            "# Karukan conversion behavior improvement report",
             "",
             f"- Duration: {report['elapsed_seconds']:.3f} seconds",
             f"- Cases: {report['counts']['cases']} kinds / {report['counts']['case_runs']} runs",
+            f"- OSS-inspired behavior probes: {report['counts']['behavior_probe_runs']} runs",
             f"- Key events: {report['counts']['key_events']}",
             f"- Deferred refreshes: {report['counts']['refreshes']}",
             f"- RPC errors: {report['counts']['rpc_errors']}",
@@ -620,6 +864,11 @@ class EnduranceLoop:
                 )
         else:
             lines.append("- None")
+        lines.extend(["", "## OSS behavior references", ""])
+        for reference in report["oss_behavior_references"]:
+            lines.append(
+                f"- {reference['project']}: {reference['behavior']} ({reference['url']})"
+            )
         lines.extend(["", "## Observed final surfaces", ""])
         for case in CASES:
             surfaces = report["outputs"][case.name]
